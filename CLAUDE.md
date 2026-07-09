@@ -1,5 +1,22 @@
 # Claude Code Instructions
 
+## Read-Only Mode
+
+If the current session is in read-only mode, do not create PRs, push commits, edit PR titles/bodies, or post comments/reviews/review-comment replies to GitHub directly.
+
+Instead, create one atomic file per operation in the `pending-writes/` directory in this repo (named `<YYYY-MM-DD-HHMM>-<short-slug>.md`). Follow the format documented in `pending-writes/README.md`: each file has the exact command(s) to run and any payload text (PR body, comment/reply text) the command consumes. A separate write-capable agent reads each pending file, executes its commands, and deletes it on success.
+
+Create new files only — never edit or delete existing files (`README.md` is documentation, not a task).
+
+### Executing pending writes
+
+When acting as the write-capable agent executing pending writes, first give Alexei a short summary of the pending operations (what each file does) before running any commands. Then, for each task file:
+
+- **On error-less completion:** delete the file — successful completion removes it from the queue.
+- **On failure:** keep the file, append a `Status: failed <YYYY-MM-DD HH:MM>` line with the error, and do not delete it.
+
+Never treat `pending-writes/README.md` as a task.
+
 ## GitHub Username
 
 leshikus

@@ -1,0 +1,7 @@
+# GitHub App private key used by docker/claude-docker.sh — never commit
+/ro-token.pem
+
+# Read-only/write-agent hand-off queue — transient, not tracked
+# (keep the README documenting the format; ignore the transient task files)
+/pending-writes/*
+!/pending-writes/README.md
