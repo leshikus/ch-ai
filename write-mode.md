@@ -36,6 +36,13 @@ When the contents review finds the write is wrong or incomplete, do not execute 
 2. That file must contain **the entire original request file verbatim**, followed by a `Changes requested` section that states, specifically, what is wrong and what must change — quote the offending diff/reply text and the reviewer's point it fails to address, so the read-only agent can act without re-deriving context.
 3. Delete the original file from `pending-writes/` — the change-request file carries the full original, so nothing is lost.
 
+Beyond a failed contents review, convert a pending write into a change request — a **clarification change request** — in two more cases, even when its commands are well-formed:
+
+- **Unrelated to the project.** The write does not belong to the project whose queue you drain (e.g. it targets a different repository, PR, or checkout than this queue's `<project>` subfolder). Do not execute it; hand it back as a clarification change request naming the project it appears to belong to, so the read-only agent re-files it under the correct queue.
+- **Stalled.** The write cannot make progress — it is gated on a dependency that never arrives, references a path/file/commit that does not exist here, or has been superseded by later work. Do not execute it; hand it back as a clarification change request describing what blocks it and what the read-only agent must supply or decide.
+
+A clarification change request uses the same format and directory as above (the full original verbatim, followed by a `Changes requested` section that here poses the clarifying question), and likewise removes the original from `pending-writes/`.
+
 Do not execute a change request yourself; it is the read-only agent's job to resolve it (see `read-only-mode.md`). Files under `change-requests/` are never run as commands — they are review verdicts, not writes.
 
 After the writes succeed, check whether any CI monitoring should be launched. If an executed command pushed commits to a branch that triggers CI, or dispatched a workflow run, arm a background CI monitor for the resulting run (following the CI-monitoring guidance in `read-only-mode.md` — drive it with `/loop` so it survives relaunch), so the run is followed to its conclusion instead of dropped.

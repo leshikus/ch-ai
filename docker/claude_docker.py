@@ -127,6 +127,35 @@ def restart_helper(script: str, pidfile_name: str) -> None:
     )
 
 
+def ensure_claude_links() -> None:
+    """Ensure ~/.claude/CLAUDE.md and settings.json symlink to the repo copies.
+
+    These let the host's own Claude sessions use the committed config. If a link
+    is missing or broken, ask before creating it (never silently touch ~/.claude).
+    """
+    claude_dir = HOME / ".claude"
+    links = {
+        claude_dir / "CLAUDE.md": SCRIPT_DIR.parent / "CLAUDE.md",
+        claude_dir / "settings.json": SCRIPT_DIR.parent / ".claude" / "settings.json",
+    }
+    for link, target in links.items():
+        if link.exists():
+            continue  # a valid file/link is already there -- leave it
+        broken = link.is_symlink()
+        state = "a broken link" if broken else "missing"
+        if not sys.stdin.isatty():
+            print(f"warning: {link} is {state}; skipping (no TTY to confirm)", file=sys.stderr)
+            continue
+        if input(f"{link} is {state}. Point it at {target}? [y/N] ").strip().lower() in ("y", "yes"):
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            if broken:
+                link.unlink()
+            link.symlink_to(target)
+            print(f"linked {link} -> {target}")
+        else:
+            print(f"skipped {link}")
+
+
 def read_keychain_api_key() -> bytes:
     """Read the Claude Code API key from the macOS login Keychain."""
     try:
@@ -146,6 +175,7 @@ def main() -> None:
     write_mode = "--write" in sys.argv[1:]
     claude_args = [a for a in sys.argv[1:] if a != "--write"]
 
+    ensure_claude_links()
     APP_DIR.mkdir(parents=True, exist_ok=True)
     # The container mounts only these two queue dirs (never the parent, which holds
     # ro-token.pem); create them so the bind mounts attach real dirs, not new
@@ -200,6 +230,13 @@ def main() -> None:
     hook_script = f"{to_container_repo_path(SCRIPT_DIR)}/queue_writes.py"
     workdir = to_container_repo_path(Path.cwd())
 
+    # Inject this container's role instructions directly. Read the host-side doc
+    # (write-mode for --write, read-only-mode otherwise) and append it to claude's
+    # system prompt -- more reliable than the global CLAUDE.md @imports, whose host
+    # paths do not resolve inside the container.
+    mode_doc = SCRIPT_DIR.parent / ("write-mode.md" if write_mode else "read-only-mode.md")
+    mode_prompt = mode_doc.read_text() if mode_doc.is_file() else ""
+
     settings = {
         "apiKeyHelper": "cat /home/ubuntu/.config/claude-toolkit/anthropic-key",
         "theme": "dark",
@@ -235,8 +272,11 @@ def main() -> None:
         *pending_env,
         "-w", workdir,
         "-v", f"{HOME}/repos:/home/ubuntu/repos:rw",
-        # Claude Code's own config (settings, CLAUDE.md, onboarding state).
-        "-v", f"{HOME}/.claude:/home/ubuntu/.claude:rw",
+        # Claude Code config: mount the repo's committed CLAUDE.md + settings.json
+        # (located relative to this script, so the checkout can live anywhere) into
+        # ~/.claude, rather than the host's personal ~/.claude.
+        "-v", f"{SCRIPT_DIR.parent}/CLAUDE.md:/home/ubuntu/.claude/CLAUDE.md:rw",
+        "-v", f"{SCRIPT_DIR.parent}/.claude/settings.json:/home/ubuntu/.claude/settings.json:rw",
         "-v", f"{HOME}/.claude.json:/home/ubuntu/.claude.json:rw",
         "-v", f"{HOME}/.gitconfig:/home/ubuntu/.gitconfig:ro",
         # Our runtime state. Mount ONLY the two queue dirs and the key file -- NOT
@@ -256,6 +296,7 @@ def main() -> None:
         "-e", f"GIT_CONFIG_VALUE_0={git_helper}",
         IMAGE, *perms_flag,
         "--settings", json.dumps(settings),
+        *(["--append-system-prompt", mode_prompt] if mode_prompt else []),
         *claude_args,
     ]
 

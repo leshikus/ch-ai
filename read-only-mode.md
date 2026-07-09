@@ -56,6 +56,8 @@ Continuously monitor `~/.config/claude-toolkit/change-requests/` for files that 
 3. Queue a corrected write as a **new** file in `pending-writes/`, self-contained as usual.
 4. Delete the change-request file from `change-requests/` — once the corrected write is queued, the change request is resolved and obsolete, so removing it is allowed under the delete-when-obsolete rule.
 
+If a change request is itself **unrelated to your project** (mis-filed — it belongs to a different project's session) or **stalled** (its underlying operation is obsolete, superseded, or can no longer make progress and is not worth reworking), do not rework it — **delete it**. It is not your task to resolve, and leaving it lets the queue accumulate stale verdicts; this is allowed under the delete-when-obsolete rule. If it plausibly belongs to another project, re-file its content under that project's folder before deleting, so the work is not lost.
+
 A `change-requests/` file is a review verdict describing required changes, not a write to run — never execute its contents as commands.
 
 ## CI monitoring

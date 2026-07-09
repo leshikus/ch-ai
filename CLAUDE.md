@@ -1,9 +1,5 @@
 # Claude Code Instructions
 
-## Read-Only Mode
-
-See [read-only-mode.md](read-only-mode.md) for read-only Docker session behavior (authoring the pending-writes hand-off queue and its format) and [write-mode.md](write-mode.md) for the write-capable agent that processes the queue.
-
 ## GitHub Username
 
 leshikus
@@ -156,3 +152,73 @@ This filter is strict: do **not** carry forward still-open PRs that had no activ
 ## Updating These Instructions
 
 When the user gives new instructions about how to work (e.g., how to format reports, what to include/exclude, how to handle edge cases), add them to this file so they persist to future conversations.
+
+# Communication style
+
+Keep replies terse — minimal words, no preamble, no recaps, no restating the request. Lead with the conclusion; prefer bullets/code over prose. Expand only when asked or when correctness needs it. Still flag real risks, briefly.
+
+When addressing a review comment, quote the comment's text in the chat response to the user, so it's clear which comment is being worked on. When addressing an error message, quote the error the same way. Show this only in the chat response — not in code comments, commit messages, or the reply/PR text posted to GitHub.
+
+When making a code fix while accept-edits mode is on (edits apply without a per-edit approval prompt), show the resulting diff in the chat response so the user can review what changed.
+
+# Repository locations
+
+All my working repositories live under `~/repos/` (e.g. `~/repos/release`, `~/repos/ClickHouse`, `~/repos/ClickHouse-private`). Older paths like `~/ch-*` or `~/ClickHouse` are obsolete — do not look there.
+
+# Non-clickhouse projects
+
+Always run `git status` before committing; always include `--author="Alexei Fedotov <alexei.fedotov@gmail.com>"` in commit commands. Never add Co-authored-by lines to commit messages.
+
+# ClickHouse projects
+
+Always run `git status` before committing; always include `--author="Alexei Fedotov <alexei.fedotov@clickhouse.com>"` in commit commands. Never add Co-authored-by lines to commit messages.
+
+When creating or updating a PR description, always invoke the `clickhouse-pr-description` skill (via the Skill tool) and let it generate and apply the description — never hand-write the title/body or run `gh pr create`/`gh pr edit` for the description directly. This applies to every ClickHouse PR, including minor or CI-only ones.
+
+Follow `.github/PULL_REQUEST_TEMPLATE.md` exactly: the body is a short description and motivation, then the Changelog category (leave one), then the Changelog entry. Do not add sections the template does not contain — in particular there is no "Documentation entry" section, so never add one. For categories whose label says the changelog entry is not required (e.g. `CI Fix or Improvement`, `Documentation`, `Not for changelog`), leave the Changelog entry empty.
+
+When creating a PR, open it as a **Draft** — this prevents accidental merges.
+
+When marking a PR ready for review (transitioning it out of Draft), first actualize its title and body via the `clickhouse-pr-description` skill. Both are often written against an early draft state; by the time the PR is ready the change, motivation, and CI story have usually moved on, so regenerate the subject and description before it goes in front of reviewers.
+
+When a PR only touches files under `.claude/` (settings, tools, skills, instructions, etc.), prefix the title with `claude: ` and use the `Documentation (changelog entry is not required)` changelog category. Example: `claude: add fetch_ci_report.js to allowed commands`.
+
+When a PR is about Darwin fast tests (e.g. adding entries to `ci/defs/darwin.skip`, fixing tests that fail only on Darwin), prefix the title with `darwin fast test: ` and use the `CI Fix or Improvement (changelog entry is not required)` changelog category. Example: `darwin fast test: skip more tests on Darwin ARM`.
+
+When adding new prompt conventions, rules, or guidelines that apply to all ClickHouse projects, add them to `~/.claude/CLAUDE.md` in addition to any project-specific location.
+
+When adding or updating ClickHouse-related permissions in `~/.claude/settings.json` or rules in `~/.claude/CLAUDE.md`, accumulate the changes locally. Do not open an individual PR for each change — they will be combined into a single PR once per week. Once the combined PR is merged, remove the corresponding entries from the local `~/.claude/` files.
+
+## Containerized environment
+
+When running in a containerized version (no GitHub credentials, working tree is a throwaway copy), do not push or otherwise mutate the tree's remote state — just prepare the PR description and hand back the commands to run. You may freely install anything you need in the container (e.g. `python`).
+
+## Shell commands
+
+When running Bash, prefer separate atomic invocations over chaining with `&&`, `;`, or `|`. Issue each command as its own Bash tool call (in parallel when independent) instead of joining them into one string.
+
+**Why:** Permission rules match the literal command string. A chain like `ls *.txt | head` does not match `Bash(ls *)` or `Bash(head *)` and triggers an unnecessary prompt. Atomic calls hit the existing allowlist cleanly.
+
+**How to apply:** Default to splitting. Chain only when later commands genuinely need the earlier command's exit status or stdout (e.g. `cmd && other`) and no equivalent split exists.
+
+## Python standard library
+
+When writing Python code, prefer standard library modules over custom implementations. For example, use `urllib` for HTTP requests, `json` for JSON parsing, `tarfile` for archives, `subprocess` for running commands. Reach for third-party packages only when the standard library genuinely cannot express the required behavior.
+
+In Python code, do not shell out to bash (via `subprocess`, `os.system`, `Shell.check`, etc.) for operations the standard library already provides — use the Python API instead. For example: `os.remove` / `pathlib.Path.unlink` instead of `rm`, `shutil.rmtree` instead of `rm -rf`, `os.makedirs` instead of `mkdir -p`, `os.chmod` instead of `chmod`, `shutil.copy` instead of `cp`, `pathlib.Path.glob` instead of `ls`/`find`. Reserve shelling out for invoking genuinely external programs (e.g. `git`, `docker`, `gh`, `reprepro`). This is safer (no shell quoting/injection), clearer, and easier to test.
+
+## Fork vs upstream
+
+If the current repository is a fork (i.e. `git remote get-url origin` does not contain `ClickHouse/ClickHouse`), always target the upstream repository. Pass `--repo ClickHouse/ClickHouse` to `gh pr create` and set `--head <fork-owner>:<branch>` so the PR is opened against the canonical repo, not the fork.
+
+After creating a fork-based PR, immediately add the `can be tested` label so CI is not blocked by the `can_be_tested` pre-hook:
+
+```
+gh pr edit <PR-number> --repo ClickHouse/ClickHouse --add-label "can be tested"
+```
+
+## CI monitoring
+
+Whenever you push commits to a branch that triggers CI, or you dispatch a workflow run, **always arm a background CI monitor** for the resulting run (a `run_in_background` poll that re-invokes you on completion), so you follow the run to its conclusion instead of dropping it.
+
+When a monitored CI run completes **with an error**, do an **initial evaluation** before handing back: fetch the failed logs (`gh run view <id> --log-failed` / `--log`, or `.claude/tools/fetch_ci_report.js` for PR CI reports), identify the failing step, and state a concrete root-cause hypothesis. Do not just report "it failed" — surface the actual error and your first read on it.

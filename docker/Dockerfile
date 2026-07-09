@@ -33,5 +33,10 @@ USER ubuntu
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="${HOME}/.local/bin:${PATH}"
 
+# Pre-create ~/.claude (owned by this user) so bind-mounting individual config
+# files into it keeps the dir writable for Claude's runtime state (projects,
+# todos, ...) instead of Docker creating it root-owned.
+RUN mkdir -p "$HOME/.claude"
+
 WORKDIR /work
 ENTRYPOINT ["claude"]
