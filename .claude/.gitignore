@@ -4,7 +4,7 @@
 # config so new runtime files are ignored by default.
 *
 !.gitignore
-!CLAUDE.md
+!toolkit-prompt.md
 !settings.json
 !hooks/
 !hooks/**

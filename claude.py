@@ -140,14 +140,15 @@ def restart_helper(script: str, pidfile_name: str) -> None:
 
 
 def ensure_claude_links() -> None:
-    """Ensure ~/.claude/CLAUDE.md and settings.json symlink to the repo copies.
+    """Ensure ~/.claude/settings.json symlinks to the repo copy.
 
-    These let the host's own Claude sessions use the committed config. If a link
-    is missing or broken, ask before creating it (never silently touch ~/.claude).
+    This lets the host's own Claude sessions use the committed settings. If the
+    link is missing or broken, ask before creating it (never silently touch
+    ~/.claude). The generic CLAUDE.md prompt is NOT linked here -- it is supplied
+    to the container directly via --append-system-prompt (see main()).
     """
     claude_dir = HOME / ".claude"
     links = {
-        claude_dir / "CLAUDE.md": REPO_DIR / ".claude" / "CLAUDE.md",
         claude_dir / "settings.json": REPO_DIR / ".claude" / "settings.json",
     }
     for link, target in links.items():
@@ -183,10 +184,27 @@ def read_keychain_api_key() -> bytes:
     return proc.stdout
 
 
+def pull_toolkit() -> None:
+    """Fast-forward the toolkit checkout so committed updates apply on launch.
+
+    Best-effort: a failure (offline, diverged, or local changes in the way) warns
+    but does not block the session -- launching with slightly stale tooling beats
+    refusing to start.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(REPO_DIR), "pull", "--ff-only"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"warning: git pull failed; using the current checkout:\n"
+              f"{result.stderr.strip()}", file=sys.stderr)
+
+
 def main() -> None:
     write_mode = "--write" in sys.argv[1:]
     claude_args = [a for a in sys.argv[1:] if a != "--write"]
 
+    pull_toolkit()
     ensure_claude_links()
     APP_DIR.mkdir(parents=True, exist_ok=True)
     # The container mounts only these two queue dirs (never the parent, which holds
@@ -255,6 +273,14 @@ def main() -> None:
         f"not prevent a mistake you just made), edit it to improve it."
     )
 
+    # The generic toolkit prompt is injected into both containers (read-only and
+    # --write) as an appended system prompt. It lives at .claude/toolkit-prompt.md
+    # (not CLAUDE.md) precisely so it is NOT auto-loaded as ~/.claude/CLAUDE.md memory
+    # via the mounted config dir -- avoiding a duplicate copy. Combine it with the
+    # mode pointer so a single --append-system-prompt carries both.
+    generic_prompt = (REPO_DIR / ".claude" / "toolkit-prompt.md").read_text().strip()
+    append_prompt = f"{generic_prompt}\n\n{mode_prompt}"
+
     settings = {
         "apiKeyHelper": "cat /home/ubuntu/.config/claude-toolkit/anthropic-key",
         "theme": "dark",
@@ -298,9 +324,11 @@ def main() -> None:
         "-w", workdir,
         "-v", f"{HOME}/repos:/home/ubuntu/repos:rw",
         # The checkout's .claude/ IS the container's ~/.claude (single rw mount):
-        # config (CLAUDE.md, settings.json), the queue hook, session_start, and the
-        # editable role docs all live here, and Claude's runtime state (history,
-        # projects, ...) persists here between sessions (git-ignored via a whitelist).
+        # config (settings.json), the queue hook, session_start, and the editable
+        # role docs all live here, and Claude's runtime state (history, projects, ...)
+        # persists here between sessions (git-ignored via a whitelist). The generic
+        # toolkit-prompt.md also lives here but is delivered via --append-system-prompt
+        # (see above), not auto-loaded as memory.
         "-v", f"{REPO_DIR}/.claude:/home/ubuntu/.claude:rw",
         "-v", f"{HOME}/.claude.json:/home/ubuntu/.claude.json:rw",
         "-v", f"{HOME}/.gitconfig:/home/ubuntu/.gitconfig:ro",
@@ -321,7 +349,7 @@ def main() -> None:
         "-e", f"GIT_CONFIG_VALUE_0={git_helper}",
         IMAGE, *perms_flag,
         "--settings", json.dumps(settings),
-        *(["--append-system-prompt", mode_prompt] if mode_prompt else []),
+        "--append-system-prompt", append_prompt,
         *claude_args,
     ]
 
