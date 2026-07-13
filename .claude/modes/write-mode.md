@@ -25,14 +25,14 @@ Then, each task file ends in one of three outcomes:
 
 ## Requesting changes (`changes_requested`)
 
-The queue is a two-directory handshake:
+The queue is a hand-off between agents:
 
 - `~/.config/claude-toolkit/pending-writes/` — read-only agent → write agent (writes to execute).
-- `~/.config/claude-toolkit/change-requests/` — write agent → read-only agent (review verdicts to resolve).
+- `~/.config/claude-toolkit/pending-reads/` — the read-only agent's inbox. You author **change requests** here (review verdicts to resolve); the host monitor also drops CI results (`ci-status-*`) here. You do **not** consume this directory.
 
 When the contents review finds the write is wrong or incomplete, do not execute it and do not silently fix it yourself. Replace the write request with a **change request** so the read-only agent that has the task context reworks it:
 
-1. Create a file in `~/.config/claude-toolkit/change-requests/` named after the original request (`<original-file-name>.md` — the directory conveys that it is a change request, so no name prefix is needed).
+1. Create a file in `~/.config/claude-toolkit/pending-reads/` named after the original request (`<original-file-name>.md` — it keeps the original's timestamped name, so it never collides with the monitor's `ci-status-*` results).
 2. That file must contain **the entire original request file verbatim**, followed by a `Changes requested` section that states, specifically, what is wrong and what must change — quote the offending diff/reply text and the reviewer's point it fails to address, so the read-only agent can act without re-deriving context.
 3. Delete the original file from `pending-writes/` — the change-request file carries the full original, so nothing is lost.
 
@@ -43,12 +43,12 @@ Beyond a failed contents review, convert a pending write into a change request �
 
 A clarification change request uses the same format and directory as above (the full original verbatim, followed by a `Changes requested` section that here poses the clarifying question), and likewise removes the original from `pending-writes/`.
 
-Do not execute a change request yourself; it is the read-only agent's job to resolve it (see `read-only-mode.md`). Files under `change-requests/` are never run as commands — they are review verdicts, not writes.
+Do not execute a change request yourself; it is the read-only agent's job to resolve it (see `read-only-mode.md`). Files under `pending-reads/` are never run as commands — they are verdicts and results, not writes.
 
-After the writes succeed, check whether any CI monitoring should be launched. If an executed command pushed commits to a branch that triggers CI, or dispatched a workflow run, arm a background CI monitor for the resulting run (following the CI-monitoring guidance in `read-only-mode.md` — drive it with `/loop` so it survives relaunch), so the run is followed to its conclusion instead of dropped.
+CI monitoring is armed for you automatically: after a successful `git push`, the `arm_monitor` PostToolUse hook drops a `ci` request into `pending-monitoring/`, and the host monitor polls that run to conclusion and reports it back as a `ci-status-*` file in `pending-reads/`. You do **not** need to launch or `/loop` a CI monitor yourself. If you triggered a run some other way the push hook cannot see, you may drop your own `pending-monitoring/<project>/<slug>.json` request (schema in `read-only-mode.md`).
 
 ## Continuous monitoring
 
-Continuously monitor the `~/.config/claude-toolkit/pending-writes/` directory. When a new task file appears, start processing it right away following the rules above (summarize for Alexei, safety-check, contents-review, then execute-and-delete, mark failed, or request changes). Do not wait to be asked — as soon as a new pending write shows up, pick it up and process it. (You do not consume `change-requests/`; that is the read-only agent's queue to resolve.)
+Continuously monitor the `~/.config/claude-toolkit/pending-writes/` directory. When a new task file appears, start processing it right away following the rules above (summarize for Alexei, safety-check, contents-review, then execute-and-delete, mark failed, or request changes). Do not wait to be asked — as soon as a new pending write shows up, pick it up and process it. (You do not consume `pending-reads/` or `pending-monitoring/`; the read-only agent resolves `pending-reads/` and the host monitor services `pending-monitoring/`.)
 
 Also check the queue whenever you finish a piece of work: as soon as any task completes, immediately re-scan `~/.config/claude-toolkit/pending-writes/` and report any pending writes to Alexei before moving on.

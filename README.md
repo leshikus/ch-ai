@@ -11,7 +11,7 @@ Other "sandbox your agent" tools protect your *files*. This one protects your *G
 ./claude.py --write    # drain the queue — you approve each write
 ```
 
-You mostly just run the read-only session. When writes pile up, a watcher pops open a `--write` tab per project (projects drain concurrently, a tab each) where you approve them; close each when done.
+You mostly just run the read-only session. When writes pile up, a watcher pops open a `--write` tab per project (projects drain concurrently, a tab each) where you approve them; close each when done. After an approved push lands, that same watcher follows its CI to conclusion and drops the result back into the read-only session's queue to react to — no `/loop` babysitting.
 
 ## How the safety works
 

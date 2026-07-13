@@ -207,11 +207,12 @@ def main() -> None:
     pull_toolkit()
     ensure_claude_links()
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    # The container mounts only these two queue dirs (never the parent, which holds
+    # The container mounts only these queue dirs (never the parent, which holds
     # ro-token.pem); create them so the bind mounts attach real dirs, not new
     # root-owned ones.
     (APP_DIR / "pending-writes").mkdir(exist_ok=True)
-    (APP_DIR / "change-requests").mkdir(exist_ok=True)
+    (APP_DIR / "pending-reads").mkdir(exist_ok=True)
+    (APP_DIR / "pending-monitoring").mkdir(exist_ok=True)
 
     # Always build: Docker's layer cache makes this a fast no-op when nothing in
     # the build context changed, and it picks up Dockerfile edits.
@@ -260,6 +261,7 @@ def main() -> None:
     # checkout lives. Only the working dir is translated through the ~/repos mount.
     hook_script = "/home/ubuntu/.claude/hooks/queue_writes.py"
     session_start_script = "/home/ubuntu/.claude/hooks/session_start.py"
+    arm_monitor_script = "/home/ubuntu/.claude/hooks/arm_monitor.py"
     workdir = to_container_repo_path(Path.cwd())
 
     # Point this container's session at its role doc (mounted rw under ~/.claude/modes
@@ -294,6 +296,16 @@ def main() -> None:
                 {
                     "matcher": "Bash",
                     "hooks": [{"type": "command", "command": f"python3 {hook_script}"}],
+                }
+            ],
+            # After a Bash command runs, arm_monitor arms the host monitor for any
+            # successful `git push` (drops a pending-monitoring request). It self-gates:
+            # a push denied by the queue hook in read-only mode never reaches PostToolUse,
+            # so this only fires on real pushes in the write drain container.
+            "PostToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": f"python3 {arm_monitor_script}"}],
                 }
             ],
         },
@@ -332,11 +344,12 @@ def main() -> None:
         "-v", f"{REPO_DIR}/.claude:/home/ubuntu/.claude:rw",
         "-v", f"{HOME}/.claude.json:/home/ubuntu/.claude.json:rw",
         "-v", f"{HOME}/.gitconfig:/home/ubuntu/.gitconfig:ro",
-        # Our runtime state. Mount ONLY the two queue dirs and the key file -- NOT
+        # Our runtime state. Mount ONLY these queue dirs and the key file -- NOT
         # the parent ~/.config/claude-toolkit, which holds ro-token.pem (the GitHub
         # App private key) that must never enter a container.
         "-v", f"{APP_DIR}/pending-writes:/home/ubuntu/.config/claude-toolkit/pending-writes:rw",
-        "-v", f"{APP_DIR}/change-requests:/home/ubuntu/.config/claude-toolkit/change-requests:rw",
+        "-v", f"{APP_DIR}/pending-reads:/home/ubuntu/.config/claude-toolkit/pending-reads:rw",
+        "-v", f"{APP_DIR}/pending-monitoring:/home/ubuntu/.config/claude-toolkit/pending-monitoring:rw",
         "-v", f"{APP_DIR}/anthropic-key:/home/ubuntu/.config/claude-toolkit/anthropic-key:ro",
         # Private copy of the GPG keyring so the container can sign commits without
         # touching the host keyring.
