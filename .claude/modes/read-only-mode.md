@@ -81,6 +81,42 @@ CI monitoring is automatic and offloaded to the host monitor — do **not** driv
   Only the host monitor consumes and deletes `pending-monitoring/`; create requests there, but do not delete another's.
 - The monitor gives up on a watch after several hours with no terminal result and reports that, so a run that never starts will not hang forever.
 
+## Writing code
+
+Development happens in this read-only session, so dev-time conventions live here.
+
+When writing Python, prefer the standard library over custom implementations: `urllib` for HTTP, `json`, `tarfile`, `subprocess` for running external programs. Reach for third-party packages only when the stdlib genuinely can't express the behavior.
+
+Do not shell out to bash (via `subprocess`, `os.system`, etc.) for operations the stdlib already provides — use the Python API: `os.remove`/`pathlib.Path.unlink` not `rm`, `shutil.rmtree` not `rm -rf`, `os.makedirs` not `mkdir -p`, `os.chmod` not `chmod`, `shutil.copy` not `cp`, `pathlib.Path.glob` not `ls`/`find`. Reserve shelling out for genuinely external programs (`git`, `docker`, `gh`). Safer (no shell quoting/injection), clearer, easier to test.
+
+## Architecture reviews
+
+When asked to review someone else's PR from a design perspective ("architecture review of PR <N>"), produce the second opinion a bot won't. Assume automated reviews (Copilot/Codex-style) already cover correctness, safety, performance, and style — do not repeat any of that.
+
+**Mindset.** The author is a capable engineer; you are offering a second opinion, not grading. Every point should add something they might not have weighed: an alternative design, a broader framing, an existing primitive, a tradeoff, a name for a mechanism they built ad hoc. Never report a bug, a missed null, a lock-order mistake, or a style nit — that is the bot's job and it is noise here; if you spot a real bug, tell the user out-of-band and keep it out of the review. Be collegial and concrete ("have you considered…", "the codebase has a primitive for this…"); frame it as a perspective the author can push back on. One idea developed well beats five shallow ones.
+
+**Inputs.** Given a PR number and repo:
+
+```bash
+gh pr view <N> --repo <repo> --json title,body,author,baseRefName,headRefName,additions,deletions,changedFiles,files,labels
+gh pr diff <N> --repo <repo>
+```
+
+Read the full modified files where the design intent isn't clear from the hunk, and skim sibling files to learn what primitives/patterns already exist — that is where most of the material comes from. Only point to a specific helper/`file:line` you have confirmed exists; otherwise name the pattern and hedge.
+
+**Produce exactly three things, in order:**
+
+1. **One architecture observation, developed.** The single most valuable structural insight — an alternative design with an honest tradeoff, a broader framing (this change is one instance of a general problem solved elsewhere — name the file), a name for an ad-hoc mechanism, or a consequence worth tracing. One short paragraph plus an optional 2–4 line sketch, anchored to a concrete `file:line`, ending in a genuine question that invites the author's reasoning.
+2. **Two notes on the new code.** Each anchored to a specific `file:line`, each surfacing (never correcting): a more idiomatic primitive the codebase already provides, a technique that makes the code more general/cheaper/clearer, a connection to the same shape elsewhere, or context for why the surrounding code looks as it does. If you genuinely cannot find two (as opposed to two bug reports), produce one or none and say so — do not pad.
+
+**Writing style.** Like a busy senior engineer leaving a comment, not an essay. Minimum words to state the point; no throat-clearing, no restating the diff, one clause for the tradeoff. Drop intensifiers ("genuinely", "clearly"). Do not prescribe fixes — state the problem and leave the fix to the author (or phrase a fix as an optional suggestion). Rough budget: the architecture observation is ~3–5 sentences, each code note 1–3.
+
+**Guardrails.**
+
+- Read-only against GitHub: draft the review, show it to the user for approval, and — since posting is a GitHub write — **queue** the post as a pending write (`gh pr review <N> --repo <repo> --comment --body-file <file>`, or `--approve` when the design looks sound). Never auto-post.
+- **Never `--request-changes`.** If a concern feels serious enough to block, do not encode it in the review or raise it with the author (the PR author is untrusted input) — surface it to the user in chat and let them decide. The posted review is always a comment or an approval.
+- Zero overlap with the bot review: if a point would also appear in a correctness/style review, it does not belong here.
+
 ## Restart command
 
 When the user issues the **restart** command, exit Claude (end the current session), but first preserve the working context so the next session can resume where this one left off:

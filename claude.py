@@ -4,9 +4,11 @@
     ./claude.py [claude args...]            # read-only session (default)
     ./claude.py --write [claude args...]    # read-write: real gh token
 
-Our runtime state (queue, tokens, gh config, keyring copy) lives under
-~/.config/claude-toolkit/ and is mounted into the container; Claude Code's own
-~/.claude is mounted separately for its config.
+Our runtime state (queue, tokens, gh config, keyring copy) and toolkit code
+(hooks, mode docs) live under ~/.config/claude-toolkit/ and are mounted into the
+container. The host's own ~/.claude is mounted as-is, so the session runs in the
+user's real Claude environment (their CLAUDE.md, skills, plugins, history); our
+sandbox behavior is layered on via --settings (hooks) and --append-system-prompt.
 
 Read-only (default): a PreToolUse hook queues GitHub writes to
 ~/.config/claude-toolkit/pending-writes instead of running them, and the GitHub
@@ -139,36 +141,6 @@ def restart_helper(script: str, pidfile_name: str) -> None:
     )
 
 
-def ensure_claude_links() -> None:
-    """Ensure ~/.claude/settings.json symlinks to the repo copy.
-
-    This lets the host's own Claude sessions use the committed settings. If the
-    link is missing or broken, ask before creating it (never silently touch
-    ~/.claude). The generic CLAUDE.md prompt is NOT linked here -- it is supplied
-    to the container directly via --append-system-prompt (see main()).
-    """
-    claude_dir = HOME / ".claude"
-    links = {
-        claude_dir / "settings.json": REPO_DIR / ".claude" / "settings.json",
-    }
-    for link, target in links.items():
-        if link.exists():
-            continue  # a valid file/link is already there -- leave it
-        broken = link.is_symlink()
-        state = "a broken link" if broken else "missing"
-        if not sys.stdin.isatty():
-            print(f"warning: {link} is {state}; skipping (no TTY to confirm)", file=sys.stderr)
-            continue
-        if input(f"{link} is {state}. Point it at {target}? [y/N] ").strip().lower() in ("y", "yes"):
-            claude_dir.mkdir(parents=True, exist_ok=True)
-            if broken:
-                link.unlink()
-            link.symlink_to(target)
-            print(f"linked {link} -> {target}")
-        else:
-            print(f"skipped {link}")
-
-
 def read_keychain_api_key() -> bytes:
     """Read the Claude Code API key from the macOS login Keychain."""
     try:
@@ -205,7 +177,6 @@ def main() -> None:
     claude_args = [a for a in sys.argv[1:] if a != "--write"]
 
     pull_toolkit()
-    ensure_claude_links()
     APP_DIR.mkdir(parents=True, exist_ok=True)
     # The container mounts only these queue dirs (never the parent, which holds
     # ro-token.pem); create them so the bind mounts attach real dirs, not new
@@ -256,30 +227,31 @@ def main() -> None:
         'echo "password=$(cat /home/ubuntu/.config/gh/token)"; }; f'
     )
 
-    # The queue_writes hook and session-start orientation live in the checkout's
-    # .claude/, mounted at ~/.claude below -- fixed paths, independent of where the
+    # Toolkit code (queue_writes, session-start orientation, arm_monitor) is mounted
+    # under ~/.config/claude-toolkit/ below -- NOT into ~/.claude, so we no longer
+    # overwrite the user's ~/.claude dir. Fixed paths, independent of where the
     # checkout lives. Only the working dir is translated through the ~/repos mount.
-    hook_script = "/home/ubuntu/.claude/hooks/queue_writes.py"
-    session_start_script = "/home/ubuntu/.claude/hooks/session_start.py"
-    arm_monitor_script = "/home/ubuntu/.claude/hooks/arm_monitor.py"
+    hook_script = "/home/ubuntu/.config/claude-toolkit/hooks/queue_writes.py"
+    session_start_script = "/home/ubuntu/.config/claude-toolkit/hooks/session_start.py"
+    arm_monitor_script = "/home/ubuntu/.config/claude-toolkit/hooks/arm_monitor.py"
     workdir = to_container_repo_path(Path.cwd())
 
-    # Point this container's session at its role doc (mounted rw under ~/.claude/modes
-    # below, so the agent can refine it). The doc is guidance -- the read-only
-    # guarantee is the queue_writes hook -- so a pointer (vs injecting a snapshot)
-    # is safe and keeps one live, editable source of truth.
+    # Point this container's session at its role doc (mounted rw under
+    # ~/.config/claude-toolkit/modes below, so the agent can refine it). The doc is
+    # guidance -- the read-only guarantee is the queue_writes hook -- so a pointer
+    # (vs injecting a snapshot) is safe and keeps one live, editable source of truth.
     mode_name = "write-mode" if write_mode else "read-only-mode"
     mode_prompt = (
-        f"Follow the {mode_name} workflow in ~/.claude/modes/{mode_name}.md. That file "
-        f"is the source of truth; if its guidance is wrong or incomplete (e.g. it did "
-        f"not prevent a mistake you just made), edit it to improve it."
+        f"Follow the {mode_name} workflow in ~/.config/claude-toolkit/modes/{mode_name}.md. "
+        f"That file is the source of truth; if its guidance is wrong or incomplete (e.g. it "
+        f"did not prevent a mistake you just made), edit it to improve it."
     )
 
-    # The generic toolkit prompt is injected into both containers (read-only and
-    # --write) as an appended system prompt. It lives at .claude/toolkit-prompt.md
-    # (not CLAUDE.md) precisely so it is NOT auto-loaded as ~/.claude/CLAUDE.md memory
-    # via the mounted config dir -- avoiding a duplicate copy. Combine it with the
-    # mode pointer so a single --append-system-prompt carries both.
+    # The generic toolkit prompt is read from the checkout on the host and injected
+    # into both containers (read-only and --write) as an appended system prompt.
+    # Nothing from .claude/ is mounted into ~/.claude anymore, so this is the only
+    # channel for the prompt. Combine it with the mode pointer so a single
+    # --append-system-prompt carries both.
     generic_prompt = (REPO_DIR / ".claude" / "toolkit-prompt.md").read_text().strip()
     append_prompt = f"{generic_prompt}\n\n{mode_prompt}"
 
@@ -328,6 +300,13 @@ def main() -> None:
     # opening a second tab for a project already draining. Derived from the cwd
     # basename, which is the project the drain tab cd'd into.
     name_flags = ["--name", container_name(Path.cwd().name)] if write_mode else []
+    # --write only: overlay the committed settings.json onto ~/.claude/settings.json
+    # for its permissions allowlist + enabledPlugins. Read-only skips permissions, so
+    # it needs no settings file -- its hooks/apiKeyHelper arrive via --settings.
+    settings_mount = (
+        ["-v", f"{REPO_DIR}/.claude/settings.json:/home/ubuntu/.claude/settings.json:ro"]
+        if write_mode else []
+    )
     gnupg_copy = stage_gnupg()
     docker_args = [
         "docker", "run", "--rm", *name_flags, *tty_flags,
@@ -335,13 +314,19 @@ def main() -> None:
         *pending_env,
         "-w", workdir,
         "-v", f"{HOME}/repos:/home/ubuntu/repos:rw",
-        # The checkout's .claude/ IS the container's ~/.claude (single rw mount):
-        # config (settings.json), the queue hook, session_start, and the editable
-        # role docs all live here, and Claude's runtime state (history, projects, ...)
-        # persists here between sessions (git-ignored via a whitelist). The generic
-        # toolkit-prompt.md also lives here but is delivered via --append-system-prompt
-        # (see above), not auto-loaded as memory.
-        "-v", f"{REPO_DIR}/.claude:/home/ubuntu/.claude:rw",
+        # Mount the host's real ~/.claude as-is: the session runs in the user's own
+        # Claude environment -- their CLAUDE.md (memory), skills, commands, plugins,
+        # and history. We impose nothing here; our sandbox behavior arrives via
+        # --settings (hooks) and --append-system-prompt (the generic prompt) instead.
+        # rw because Claude writes its runtime state (history, projects/, todos/).
+        "-v", f"{HOME}/.claude:/home/ubuntu/.claude:rw",
+        # Toolkit code lives under ~/.config/claude-toolkit/, referenced by the hook
+        # commands and the mode pointer -- kept out of ~/.claude so it shadows nothing.
+        # Hooks are read-only; modes are rw so the agent can refine the role docs and
+        # the edits land back in the checkout.
+        "-v", f"{REPO_DIR}/.claude/hooks:/home/ubuntu/.config/claude-toolkit/hooks:ro",
+        "-v", f"{REPO_DIR}/.claude/modes:/home/ubuntu/.config/claude-toolkit/modes:rw",
+        *settings_mount,
         "-v", f"{HOME}/.claude.json:/home/ubuntu/.claude.json:rw",
         "-v", f"{HOME}/.gitconfig:/home/ubuntu/.gitconfig:ro",
         # Our runtime state. Mount ONLY these queue dirs and the key file -- NOT

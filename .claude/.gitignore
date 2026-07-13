@@ -1,15 +1,7 @@
-# This dir is mounted as the container's ~/.claude, so Claude writes its runtime
-# state here (projects/, todos/, statsig/, shell-snapshots/, history, credentials,
-# settings.local.json). Whitelist: ignore everything, then re-include the tracked
-# config so new runtime files are ignored by default.
-*
-!.gitignore
-!toolkit-prompt.md
-!settings.json
-!hooks/
-!hooks/**
-hooks/**/__pycache__/
-!modes/
-!modes/**
-!skills/
-!skills/**
+# .claude/ now holds only source: settings.json, toolkit-prompt.md, hooks/, modes/.
+# Claude Code's own runtime state no longer lands here -- it lives in the container's
+# dedicated persistent ~/.claude (see claude.py). So just ignore bytecode and any
+# project-local settings a host session might drop here.
+__pycache__/
+*.pyc
+settings.local.json
