@@ -11,8 +11,8 @@ user's real Claude environment (their CLAUDE.md, skills, plugins, history); our
 sandbox behavior is layered on via --settings (hooks) and --append-system-prompt.
 
 Read-only (default): a PreToolUse hook queues GitHub writes to
-~/.config/claude-toolkit/pending-writes instead of running them, and the GitHub
-token is a scoped read-only App token kept fresh by a background refresher.
+~/.config/claude-toolkit/project/pending-writes instead of running them, and the
+GitHub token is a scoped read-only App token kept fresh by a background refresher.
 
 --write: extract the host's real gh token (from the login keychain via
 `gh auth token`) into a generated hosts.yml + token file, mount those into the
@@ -166,11 +166,10 @@ def main() -> None:
     pull_toolkit()
     APP_DIR.mkdir(parents=True, exist_ok=True)
     # All state for this project lives under projects/<name>/: its three pending-*
-    # queues plus a host-only meta.json recording the host checkout dir. Only the
-    # queue dirs are mounted into the container (project-scoped, so the hooks need no
-    # project logic); meta.json stays host-side so the container never sees the host
-    # path. Create the queue dirs so the bind mounts attach real dirs, not new
-    # root-owned ones -- never the parent, which holds ro-token.pem.
+    # queues plus meta.json (the host checkout dir, read by the host monitor). The
+    # whole dir is mounted at the container's ~/.config/claude-toolkit/project, so the
+    # hooks need no project logic. Create the queue dirs so the bind mount attaches
+    # real dirs, not new root-owned ones. ro-token.pem lives in APP_DIR (never mounted).
     cwd = Path.cwd()
     proj_dir = APP_DIR / "projects" / cwd.name
     for sub in ("pending-writes", "pending-reads", "pending-monitoring"):
@@ -226,10 +225,12 @@ def main() -> None:
     hook_script = "/home/ubuntu/.config/claude-toolkit/hooks/queue_writes.py"
     session_start_script = "/home/ubuntu/.config/claude-toolkit/hooks/session_start.py"
     arm_monitor_script = "/home/ubuntu/.config/claude-toolkit/hooks/arm_monitor.py"
-    # Mount just the current directory at /home/ubuntu/<cwd-name> and work there.
-    # No ~/repos assumption: the session sees only the checkout it was launched from.
-    # (cwd and proj_dir were computed above, with meta.json already recorded.)
-    workdir = f"/home/ubuntu/{cwd.name}"
+    # Mount the current directory at the fixed /home/ubuntu/project and work there.
+    # The container is project-agnostic: no repo name appears in any container path
+    # (the name lives only host-side, under projects/<name>/). No ~/repos assumption;
+    # the session sees only the checkout it was launched from. (cwd and proj_dir were
+    # computed above, with meta.json already recorded.)
+    workdir = "/home/ubuntu/project"
 
     # Point this container's session at its role doc (mounted rw under
     # ~/.config/claude-toolkit/modes below, so the agent can refine it). The doc is
@@ -330,12 +331,13 @@ def main() -> None:
         *settings_mount,
         "-v", f"{HOME}/.claude.json:/home/ubuntu/.claude.json:rw",
         "-v", f"{HOME}/.gitconfig:/home/ubuntu/.gitconfig:ro",
-        # Mount THIS project's own dir (projects/<name>/: the pending-* queues plus
-        # meta.json) AS the container's ~/.config/claude-toolkit, so the hooks see a
-        # fixed pending-writes/... path with no project name. hooks/modes/anthropic-key
-        # overlay on top as nested mounts. ro-token.pem lives in the host APP_DIR, NOT
-        # in proj_dir, so it never enters the container.
-        "-v", f"{proj_dir}:/home/ubuntu/.config/claude-toolkit:rw",
+        # Mount THIS project's own dir (projects/<name>/) at a fixed container path,
+        # ~/.config/claude-toolkit/project/, so the hooks see project/pending-writes/...
+        # with no project name. It is a fresh subtree -- nothing else mounts under it --
+        # so it sidesteps the Docker Desktop virtiofs failure you get from mounting
+        # proj_dir AS ~/.config/claude-toolkit and nesting anthropic-key/hooks/modes on
+        # top. ro-token.pem lives in APP_DIR and is never mounted.
+        "-v", f"{proj_dir}:/home/ubuntu/.config/claude-toolkit/project:rw",
         "-v", f"{APP_DIR}/anthropic-key:/home/ubuntu/.config/claude-toolkit/anthropic-key:ro",
         # Private copy of the GPG keyring so the container can sign commits without
         # touching the host keyring.

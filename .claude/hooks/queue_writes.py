@@ -18,7 +18,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-QUEUE_DIR = Path(os.path.expanduser("~/.config/claude-toolkit/pending-writes"))
+QUEUE_DIR = Path(os.path.expanduser("~/.config/claude-toolkit/project/pending-writes"))
 
 
 def is_remote_write(cmd: str) -> bool:
@@ -72,9 +72,9 @@ def slugify(text: str) -> str:
 
 def queue(cmd: str, description: str, cwd: str = "") -> Path:
     # QUEUE_DIR is already this project's queue: the container mounts the project's
-    # own projects/<name>/ as ~/.config/claude-toolkit, so pending-writes here holds
-    # only this project's writes -- no per-project subfolder. cwd is still recorded
-    # below as the `cd` target for the drain agent.
+    # own projects/<name>/ at ~/.config/claude-toolkit/project, so pending-writes here
+    # holds only this project's writes -- no per-project subfolder. cwd is still
+    # recorded below as the `cd` target for the drain agent.
     qdir = QUEUE_DIR
     qdir.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
@@ -128,7 +128,7 @@ def main() -> int:
     if not cmd or not is_remote_write(cmd):
         return 0  # not a remote write — normal permission flow
 
-    path = queue(cmd, tool_input.get("description", ""), event.get("cwd", "/home/ubuntu/misc"))
+    path = queue(cmd, tool_input.get("description", ""), event.get("cwd", "/home/ubuntu/project"))
     decision = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -136,7 +136,7 @@ def main() -> int:
             "permissionDecisionReason": (
                 f"Read-only session: this write was queued to {path} instead of "
                 f"running. Do not retry the command; continue with other work and "
-                f"monitor ~/.config/claude-toolkit/pending-writes/ — a write-capable agent will "
+                f"monitor ~/.config/claude-toolkit/project/pending-writes/ — a write-capable agent will "
                 f"execute it and remove the file (or append a Status: failed line)."
             ),
         }

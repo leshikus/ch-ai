@@ -42,14 +42,14 @@ APP_DIR = Path(os.path.expanduser("~/.config/claude-toolkit"))
 PIDFILE = APP_DIR / "monitor.pid"
 LAUNCHER = Path(__file__).resolve().parent / "claude.py"
 # All per-project state lives under projects/<name>/: the pending-writes /
-# pending-reads / pending-monitoring queues plus a host-only meta.json (host_dir,
-# so the drain tab can cd into the right repo -- no ~/repos assumption). claude.py
-# mounts projects/<name>/ AS the container's ~/.config/claude-toolkit, so container
-# paths stay fixed. Room for more per-project state later. See _project_host_dir.
+# pending-reads / pending-monitoring queues plus meta.json (host_dir, so the drain
+# tab can cd into the right repo -- no ~/repos assumption). claude.py mounts
+# projects/<name>/ at the container's ~/.config/claude-toolkit/project, so the
+# container queue paths are project-scoped. See _project_host_dir.
 PROJECTS_DIR = APP_DIR / "projects"
 # Where the queue folder appears inside the container (project-scoped mount, so no
 # per-project subfolder; ~ resolves to the container home).
-CONTAINER_QUEUE = "~/.config/claude-toolkit/pending-writes"
+CONTAINER_QUEUE = "~/.config/claude-toolkit/project/pending-writes"
 POLL = 2               # seconds between polls
 MINT_MAX_AGE = 3000    # re-mint the token when older than this (50 min)
 CI_POLL_INTERVAL = 150     # seconds between polls of a single monitoring request

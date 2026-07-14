@@ -2,7 +2,7 @@
 """PostToolUse hook: after a successful `git push`, arm the host monitor to
 follow the resulting CI run.
 
-It drops a `kind: ci` request into ~/.config/claude-toolkit/pending-monitoring/,
+It drops a `kind: ci` request into ~/.config/claude-toolkit/project/pending-monitoring/,
 which the host `monitor.py` consumes: it polls the run to conclusion and writes a
 `ci-status-*` result into pending-reads/ for the read-only agent to react to.
 
@@ -24,7 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-MONITOR_DIR = Path(os.path.expanduser("~/.config/claude-toolkit/pending-monitoring"))
+MONITOR_DIR = Path(os.path.expanduser("~/.config/claude-toolkit/project/pending-monitoring"))
 
 
 def git(cwd: str, *args: str):

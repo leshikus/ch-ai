@@ -38,6 +38,20 @@ PR_FIELDS = "number,url,state,isDraft,statusCheckRollup,reviewDecision,mergeable
 # parent.parent is .claude/.
 DUMP_FILE = Path(__file__).resolve().parent.parent / "start-session.md"
 
+# The per-project meta.json (mounted at the container's project dir) records the
+# host checkout dir; its basename is the real project name -- the container cwd is
+# the generic /home/ubuntu/project, so basename(cwd) alone would just say "project".
+META_FILE = Path("/home/ubuntu/.config/claude-toolkit/project/meta.json")
+
+
+def project_name() -> str:
+    """Real project name: basename of host_dir in meta.json, else the cwd basename."""
+    try:
+        host_dir = json.loads(META_FILE.read_text())["host_dir"]
+        return os.path.basename(host_dir.rstrip("/")) or os.path.basename(os.getcwd())
+    except (OSError, ValueError, KeyError):
+        return os.path.basename(os.getcwd())
+
 # Fetches every review thread with its full comment chain, so the hook can both
 # surface which conversations a reviewer still has open and tell whether the
 # latest word on each is the reviewer's (awaiting your reply) or yours.
@@ -235,9 +249,11 @@ def finish(lines):
 
 def main():
     lines = ["=== session-start orientation ==="]
-    # Always surface the project name (current dir basename) so the session knows
-    # which project it is in, even outside a git repo.
-    lines.append(f"Project name: {os.path.basename(os.getcwd())}")
+    # Always surface the project name so the session knows which project it is in,
+    # even outside a git repo. The repo mounts at the fixed /home/ubuntu/project, so
+    # the cwd basename is generic ("project"); read the real name from the recorded
+    # host checkout in meta.json (basename of host_dir), falling back to the cwd.
+    lines.append(f"Project name: {project_name()}")
 
     branch = current_branch()
     if branch is None:
