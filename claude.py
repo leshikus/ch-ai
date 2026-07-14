@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Claude Code in Docker with ~/repos mounted and all permissions granted.
+"""Launch Claude Code in Docker with the current directory mounted and all permissions granted.
 
     ./claude.py [claude args...]            # read-only session (default)
     ./claude.py --write [claude args...]    # read-write: real gh token
@@ -48,19 +48,6 @@ def container_name(project: str) -> str:
     """
     safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", project)
     return f"claude-toolkit-drain-{safe}"
-
-
-def to_container_repo_path(host_path: Path) -> str:
-    """Translate a host path under ~/repos to its container path.
-
-    Host repos are mounted at /home/ubuntu/repos. Mirrors the shell prefix-strip
-    `${p#"$HOME"/repos/}`: if the path is not under ~/repos it is left as-is
-    (so a misconfigured launch fails visibly rather than silently).
-    """
-    prefix = f"{HOME}/repos/"
-    p = str(host_path)
-    sub = p[len(prefix):] if p.startswith(prefix) else p
-    return f"/home/ubuntu/repos/{sub}"
 
 
 def write_mode_gh_config() -> str:
@@ -184,6 +171,7 @@ def main() -> None:
     (APP_DIR / "pending-writes").mkdir(exist_ok=True)
     (APP_DIR / "pending-reads").mkdir(exist_ok=True)
     (APP_DIR / "pending-monitoring").mkdir(exist_ok=True)
+    (APP_DIR / "projects").mkdir(exist_ok=True)
 
     # Always build: Docker's layer cache makes this a fast no-op when nothing in
     # the build context changed, and it picks up Dockerfile edits.
@@ -230,11 +218,19 @@ def main() -> None:
     # Toolkit code (queue_writes, session-start orientation, arm_monitor) is mounted
     # under ~/.config/claude-toolkit/ below -- NOT into ~/.claude, so we no longer
     # overwrite the user's ~/.claude dir. Fixed paths, independent of where the
-    # checkout lives. Only the working dir is translated through the ~/repos mount.
+    # checkout lives.
     hook_script = "/home/ubuntu/.config/claude-toolkit/hooks/queue_writes.py"
     session_start_script = "/home/ubuntu/.config/claude-toolkit/hooks/session_start.py"
     arm_monitor_script = "/home/ubuntu/.config/claude-toolkit/hooks/arm_monitor.py"
-    workdir = to_container_repo_path(Path.cwd())
+    # Mount just the current directory at /home/ubuntu/<cwd-name> and work there.
+    # No ~/repos assumption: the session sees only the checkout it was launched from.
+    cwd = Path.cwd()
+    workdir = f"/home/ubuntu/{cwd.name}"
+    # Record this project's host checkout so the monitor's drain tab can cd into it,
+    # keyed by the mount basename. Replaces the old ~/repos lookup (see monitor.py).
+    (APP_DIR / "projects" / f"{cwd.name}.json").write_text(
+        json.dumps({"host_dir": str(cwd)}) + "\n"
+    )
 
     # Point this container's session at its role doc (mounted rw under
     # ~/.config/claude-toolkit/modes below, so the agent can refine it). The doc is
@@ -319,7 +315,7 @@ def main() -> None:
         "-e", "HOME=/home/ubuntu",
         *pending_env,
         "-w", workdir,
-        "-v", f"{HOME}/repos:/home/ubuntu/repos:rw",
+        "-v", f"{cwd}:{workdir}:rw",
         # Mount the host's real ~/.claude as-is: the session runs in the user's own
         # Claude environment -- their CLAUDE.md (memory), skills, commands, plugins,
         # and history. We impose nothing here; our sandbox behavior arrives via

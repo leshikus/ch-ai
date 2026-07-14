@@ -44,7 +44,11 @@ READS_DIR = APP_DIR / "pending-reads"           # results handed back to the rea
 MONITORING_DIR = APP_DIR / "pending-monitoring"  # watch requests to service
 PIDFILE = APP_DIR / "monitor.pid"
 LAUNCHER = Path(__file__).resolve().parent / "claude.py"
-REPOS = Path(os.path.expanduser("~/repos"))
+# claude.py records per-project metadata here as <project>.json, keyed by the
+# container mount basename. Currently just the host checkout dir (host_dir) so the
+# drain tab can cd into the right repo -- no ~/repos assumption. Room for more
+# per-project state later. See _project_host_dir and claude.py.
+PROJECTS_DIR = APP_DIR / "projects"
 # Where the queue folder appears inside the container (~ resolves to the container
 # home, so no host path is hardcoded).
 CONTAINER_QUEUE = "~/.config/claude-toolkit/pending-writes"
@@ -132,6 +136,23 @@ def _build_prompt(project: str) -> str:
     return "\n\n".join(parts)
 
 
+def _project_host_dir(project: str) -> Path:
+    """Host checkout dir for a drained project, recorded by claude.py at launch.
+
+    claude.py writes projects/<project>.json = {"host_dir": ...} for each session; the
+    drain tab cd's there before launching claude.py --write. Falls back to $HOME if the
+    record is missing or stale so the tab still opens visibly rather than failing.
+    """
+    try:
+        data = json.loads((PROJECTS_DIR / f"{project}.json").read_text())
+        host_dir = Path(data["host_dir"])
+        if host_dir.is_dir():
+            return host_dir
+    except (OSError, ValueError, KeyError):
+        pass
+    return Path.home()
+
+
 def _open_terminal_tab(project: str) -> None:
     """Open a terminal tab running an interactive --write drain for this project.
 
@@ -140,8 +161,7 @@ def _open_terminal_tab(project: str) -> None:
     via a prompt file the tab's shell reads with $(cat ...), so no multi-line text
     goes through AppleScript `write text` (which would submit it line by line).
     """
-    cwd = REPOS / project
-    cwd = cwd if cwd.is_dir() else Path.home()
+    cwd = _project_host_dir(project)
     prompt_file = APP_DIR / f"drain-prompt-{project}.md"
     prompt_file.write_text(_build_prompt(project))
     launch = (

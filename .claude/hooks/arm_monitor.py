@@ -92,16 +92,6 @@ def find_pr(branch: str, repo):
     return None, None
 
 
-def project_name(cwd: str) -> str:
-    """Per-project subfolder from the cwd (~/repos/<project>/...), else 'misc'."""
-    parts = Path(cwd).parts if cwd else ()
-    if "repos" in parts:
-        i = parts.index("repos")
-        if i + 1 < len(parts):
-            return parts[i + 1]
-    return "misc"
-
-
 def main() -> int:
     try:
         event = json.load(sys.stdin)
@@ -135,7 +125,7 @@ def main() -> int:
         "context": "Armed by arm_monitor after a successful git push.",
     }
 
-    folder = MONITOR_DIR / project_name(cwd)
+    folder = MONITOR_DIR / (Path(cwd).name or "misc")
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"ci-{sha[:12]}.json"
     path.write_text(json.dumps(request, indent=2) + "\n")

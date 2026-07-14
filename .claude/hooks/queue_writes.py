@@ -70,22 +70,11 @@ def slugify(text: str) -> str:
     return (text or "write")[:48]
 
 
-def project_dir(cwd: str) -> Path:
-    """Per-project subfolder from the container cwd (/home/ubuntu/repos/<project>/...).
-
-    Grouping a session's writes keeps their order intact and lets the host watcher
-    open one drain tab per project. Falls back to 'misc' when cwd is outside ~/repos.
-    """
-    parts = Path(cwd).parts if cwd else ()
-    if "repos" in parts:
-        i = parts.index("repos")
-        if i + 1 < len(parts):
-            return QUEUE_DIR / parts[i + 1]
-    return QUEUE_DIR / "misc"
-
-
 def queue(cmd: str, description: str, cwd: str = "") -> Path:
-    qdir = project_dir(cwd)
+    # The container mounts exactly one checkout at /home/ubuntu/<project> and the
+    # session runs there, so the cwd basename is the project. Grouping writes under
+    # it keeps their order and lets the host watcher open one drain tab per project.
+    qdir = QUEUE_DIR / Path(cwd).name
     qdir.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     stamp = now.strftime("%Y-%m-%d-%H%M")
@@ -138,7 +127,7 @@ def main() -> int:
     if not cmd or not is_remote_write(cmd):
         return 0  # not a remote write — normal permission flow
 
-    path = queue(cmd, tool_input.get("description", ""), event.get("cwd", ""))
+    path = queue(cmd, tool_input.get("description", ""), event.get("cwd", "/home/ubuntu/misc"))
     decision = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
