@@ -1,18 +1,32 @@
 # Read-Only Mode (Docker)
 
+This file is loaded only when the session is in read-only mode, so everything below applies unconditionally for the whole session — it is not gated on any per-action check.
+
 The session-start hook (`session_start.py`) drives on-start orientation: when the current branch is found it asks you to show the related PR's progress (CI/check status, review decision, unresolved review threads, mergeability). That instruction now lives in the hook, so it is not repeated here.
 
-If the current session is in read-only mode, do not create PRs, push commits, edit PR titles/bodies, or post comments/reviews/review-comment replies to GitHub directly.
+You **do** make local git commits yourself — committing writes only to the local repository, never to a remote, so it is safe here. Do the code change and `git commit` it in this session. What you must **not** do is anything that writes to a remote or to GitHub: do not `git push`, create PRs, edit PR titles/bodies, or post comments/reviews/review-comment replies. Delegate only those: after committing locally, queue the **push** (and any GitHub API write) as a pending write for the write-capable agent.
 
-Instead, create one atomic file per operation in a per-project subfolder `~/.config/claude-toolkit/pending-writes/<project>/` (named `<short-slug>.md`), where `<project>` is the basename of the working directory the operation relates to — e.g. `createrelease` — following the queue format below. The subfolder groups a session's writes so the write-capable agent drains one project per tab. Each file has the exact command(s) to run and any payload text (PR body, comment/reply text) the command consumes. A separate write-capable agent (see `write-mode.md`) reads each pending file, executes its commands, and deletes it on success.
+For each delegated write, create one atomic file per operation in a per-project subfolder `~/.config/claude-toolkit/pending-writes/<project>/` (named `<short-slug>.md`), where `<project>` is the basename of the working directory the operation relates to — e.g. `createrelease` — following the queue format below. The subfolder groups a session's writes so the write-capable agent drains one project per tab. Each file has the exact command(s) to run and any payload text (PR body, comment/reply text) the command consumes. A separate write-capable agent (see `write-mode.md`) reads each pending file, executes its commands, and deletes it on success.
 
 Create new files only — never edit an existing file. You may delete a queued file, but only once the operation it represents is verified complete or definitively obsolete: e.g. its intended remote state already exists (a push whose commit is already the remote tip), or a later authoritative file supersedes it. Never delete a file to "unblock" yourself before its work is done, and never delete a file belonging to another task whose completion you have not verified.
 
 After queuing a pending write, do not block on it: keep working on the rest of the task. Continuously monitor `~/.config/claude-toolkit/pending-writes/` for the files you queued — a write-capable agent removes each file once it completes (or appends a `Status: failed` line on failure). When your queued write disappears, treat the operation as done and continue; if it gains a `Status: failed` line, surface the failure to the user. Never edit your own queued files, and never delete one merely to "unblock" yourself — but do delete a queued file once you have verified its operation is already complete or obsolete (e.g. the push it requests already landed, or it was superseded by a later file), so the queue does not accumulate stale or failing commands.
 
+## Review your commits with a different model
+
+Once you have committed a non-trivial code change locally (and before queuing the push), get a second pair of eyes from a **different model** than the one that wrote the change — a different reasoner catches what the author's own blind spots miss. Launch a subagent with an explicit model override, pointed at the commit's diff:
+
+```
+Agent(subagent_type: "code-reviewer" (or "general-purpose"), model: <a different model than yours>,
+      prompt: "Review the change in <commit-or-diff> for correctness, safety, and whether it actually
+               fixes <the stated problem>. Report issues only; do not edit.")
+```
+
+Feed it the diff (`git show <sha>` / `git diff`) and the problem statement. Surface anything it flags to the user before the push is drained; if it finds a real defect, fix it in a **new** local commit (never amend) and re-review. Skip this only for trivial or mechanical commits where a review would add nothing.
+
 ## Queue format
 
-The `~/.config/claude-toolkit/pending-writes/` directory is a hand-off queue between a **read-only agent** (which cannot perform write operations) and a **write-capable agent** (which executes them — see `write-mode.md`). Each pending write is **one atomic file**.
+The `~/.config/claude-toolkit/pending-writes/` directory is a hand-off queue between a **read-only agent** (which commits locally but cannot push or write to GitHub) and a **write-capable agent** (which executes the remote/GitHub writes — see `write-mode.md`). Each pending write is **one atomic file**. Because the read-only agent has already committed, a code-change hand-off is typically just a `git push` of the branch — not a `git add`/`git commit`/`git push` sequence.
 
 Create one file per operation at `<project>/<short-slug>.md`, where `<project>` is the basename of the current working directory (e.g. `createrelease`). Do not use a date/time stamp — pick a distinct `<short-slug>` per operation so files never collide:
 
@@ -43,7 +57,7 @@ When fixing a human reviewer's comment, always show the user three things togeth
 2. **The diff** — the exact code change that addresses it, shown as a colored diff (a fenced ```diff block, or `git diff --color`) so additions and removals are easy to read.
 3. **The reply** — the text you intend to post back on the thread. When the comment is resolved by a code fix, the reply is just `Fixed in <full commit URL>`; put any useful explanation into that fix commit's message rather than the reply.
 
-Only after the user confirms should you queue the commit/push and the reply/resolve as pending writes. This keeps the human in the loop on both the fix and the wording of the response.
+Only after the user confirms should you commit the fix locally and then queue the push and the reply/resolve as pending writes. This keeps the human in the loop on both the fix and the wording of the response.
 
 Implement different review comments as different commits, unless they are tightly coupled (one change cannot stand without the other). One commit per comment keeps the fix self-contained, makes the `Fixed in <commit URL>` reply point at exactly the change that addresses the thread, and lets each fix be reviewed and reverted independently.
 
