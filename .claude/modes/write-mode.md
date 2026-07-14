@@ -38,14 +38,14 @@ When the contents review finds the write is wrong or incomplete, do not execute 
 
 Beyond a failed contents review, convert a pending write into a change request — a **clarification change request** — in two more cases, even when its commands are well-formed:
 
-- **Unrelated to the project.** The write does not belong to the project whose queue you drain (e.g. it targets a different repository, PR, or checkout than this queue's `<project>` subfolder). Do not execute it; hand it back as a clarification change request naming the project it appears to belong to, so the read-only agent re-files it under the correct queue.
+- **Unrelated to the project.** The write does not belong to the project whose queue you drain (e.g. it targets a different repository, PR, or checkout than this drain's project). Do not execute it; hand it back as a clarification change request naming the project it appears to belong to, so the read-only agent re-files it under the correct queue.
 - **Stalled.** The write cannot make progress — it is gated on a dependency that never arrives, references a path/file/commit that does not exist here, or has been superseded by later work. Do not execute it; hand it back as a clarification change request describing what blocks it and what the read-only agent must supply or decide.
 
 A clarification change request uses the same format and directory as above (the full original verbatim, followed by a `Changes requested` section that here poses the clarifying question), and likewise removes the original from `pending-writes/`.
 
 Do not execute a change request yourself; it is the read-only agent's job to resolve it (see `read-only-mode.md`). Files under `pending-reads/` are never run as commands — they are verdicts and results, not writes.
 
-CI monitoring is armed for you automatically: after a successful `git push`, the `arm_monitor` PostToolUse hook drops a `ci` request into `pending-monitoring/`, and the host monitor polls that run to conclusion and reports it back as a `ci-status-*` file in `pending-reads/`. You do **not** need to launch or `/loop` a CI monitor yourself. If you triggered a run some other way the push hook cannot see, you may drop your own `pending-monitoring/<project>/<slug>.json` request (schema in `read-only-mode.md`).
+CI monitoring is armed for you automatically: after a successful `git push`, the `arm_monitor` PostToolUse hook drops a `ci` request into `pending-monitoring/`, and the host monitor polls that run to conclusion and reports it back as a `ci-status-*` file in `pending-reads/`. You do **not** need to launch or `/loop` a CI monitor yourself. If you triggered a run some other way the push hook cannot see, you may drop your own `pending-monitoring/<slug>.json` request (schema in `read-only-mode.md`).
 
 ## Continuous monitoring
 

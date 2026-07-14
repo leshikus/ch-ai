@@ -125,9 +125,8 @@ def main() -> int:
         "context": "Armed by arm_monitor after a successful git push.",
     }
 
-    folder = MONITOR_DIR / (Path(cwd).name or "misc")
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"ci-{sha[:12]}.json"
+    MONITOR_DIR.mkdir(parents=True, exist_ok=True)
+    path = MONITOR_DIR / f"ci-{sha[:12]}.json"
     path.write_text(json.dumps(request, indent=2) + "\n")
     return 0
 

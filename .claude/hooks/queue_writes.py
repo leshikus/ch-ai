@@ -71,10 +71,11 @@ def slugify(text: str) -> str:
 
 
 def queue(cmd: str, description: str, cwd: str = "") -> Path:
-    # The container mounts exactly one checkout at /home/ubuntu/<project> and the
-    # session runs there, so the cwd basename is the project. Grouping writes under
-    # it keeps their order and lets the host watcher open one drain tab per project.
-    qdir = QUEUE_DIR / Path(cwd).name
+    # QUEUE_DIR is already this project's queue: the container mounts the project's
+    # own projects/<name>/ as ~/.config/claude-toolkit, so pending-writes here holds
+    # only this project's writes -- no per-project subfolder. cwd is still recorded
+    # below as the `cd` target for the drain agent.
+    qdir = QUEUE_DIR
     qdir.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     stamp = now.strftime("%Y-%m-%d-%H%M")

@@ -165,13 +165,17 @@ def main() -> None:
 
     pull_toolkit()
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    # The container mounts only these queue dirs (never the parent, which holds
-    # ro-token.pem); create them so the bind mounts attach real dirs, not new
-    # root-owned ones.
-    (APP_DIR / "pending-writes").mkdir(exist_ok=True)
-    (APP_DIR / "pending-reads").mkdir(exist_ok=True)
-    (APP_DIR / "pending-monitoring").mkdir(exist_ok=True)
-    (APP_DIR / "projects").mkdir(exist_ok=True)
+    # All state for this project lives under projects/<name>/: its three pending-*
+    # queues plus a host-only meta.json recording the host checkout dir. Only the
+    # queue dirs are mounted into the container (project-scoped, so the hooks need no
+    # project logic); meta.json stays host-side so the container never sees the host
+    # path. Create the queue dirs so the bind mounts attach real dirs, not new
+    # root-owned ones -- never the parent, which holds ro-token.pem.
+    cwd = Path.cwd()
+    proj_dir = APP_DIR / "projects" / cwd.name
+    for sub in ("pending-writes", "pending-reads", "pending-monitoring"):
+        (proj_dir / sub).mkdir(parents=True, exist_ok=True)
+    (proj_dir / "meta.json").write_text(json.dumps({"host_dir": str(cwd)}) + "\n")
 
     # Always build: Docker's layer cache makes this a fast no-op when nothing in
     # the build context changed, and it picks up Dockerfile edits.
@@ -224,13 +228,8 @@ def main() -> None:
     arm_monitor_script = "/home/ubuntu/.config/claude-toolkit/hooks/arm_monitor.py"
     # Mount just the current directory at /home/ubuntu/<cwd-name> and work there.
     # No ~/repos assumption: the session sees only the checkout it was launched from.
-    cwd = Path.cwd()
+    # (cwd and proj_dir were computed above, with meta.json already recorded.)
     workdir = f"/home/ubuntu/{cwd.name}"
-    # Record this project's host checkout so the monitor's drain tab can cd into it,
-    # keyed by the mount basename. Replaces the old ~/repos lookup (see monitor.py).
-    (APP_DIR / "projects" / f"{cwd.name}.json").write_text(
-        json.dumps({"host_dir": str(cwd)}) + "\n"
-    )
 
     # Point this container's session at its role doc (mounted rw under
     # ~/.config/claude-toolkit/modes below, so the agent can refine it). The doc is
@@ -331,12 +330,12 @@ def main() -> None:
         *settings_mount,
         "-v", f"{HOME}/.claude.json:/home/ubuntu/.claude.json:rw",
         "-v", f"{HOME}/.gitconfig:/home/ubuntu/.gitconfig:ro",
-        # Our runtime state. Mount ONLY these queue dirs and the key file -- NOT
-        # the parent ~/.config/claude-toolkit, which holds ro-token.pem (the GitHub
-        # App private key) that must never enter a container.
-        "-v", f"{APP_DIR}/pending-writes:/home/ubuntu/.config/claude-toolkit/pending-writes:rw",
-        "-v", f"{APP_DIR}/pending-reads:/home/ubuntu/.config/claude-toolkit/pending-reads:rw",
-        "-v", f"{APP_DIR}/pending-monitoring:/home/ubuntu/.config/claude-toolkit/pending-monitoring:rw",
+        # Mount THIS project's own dir (projects/<name>/: the pending-* queues plus
+        # meta.json) AS the container's ~/.config/claude-toolkit, so the hooks see a
+        # fixed pending-writes/... path with no project name. hooks/modes/anthropic-key
+        # overlay on top as nested mounts. ro-token.pem lives in the host APP_DIR, NOT
+        # in proj_dir, so it never enters the container.
+        "-v", f"{proj_dir}:/home/ubuntu/.config/claude-toolkit:rw",
         "-v", f"{APP_DIR}/anthropic-key:/home/ubuntu/.config/claude-toolkit/anthropic-key:ro",
         # Private copy of the GPG keyring so the container can sign commits without
         # touching the host keyring.

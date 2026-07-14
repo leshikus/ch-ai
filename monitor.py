@@ -39,18 +39,16 @@ import mint_gh_token
 from claude import container_name
 
 APP_DIR = Path(os.path.expanduser("~/.config/claude-toolkit"))
-QUEUE_DIR = APP_DIR / "pending-writes"
-READS_DIR = APP_DIR / "pending-reads"           # results handed back to the read-only agent
-MONITORING_DIR = APP_DIR / "pending-monitoring"  # watch requests to service
 PIDFILE = APP_DIR / "monitor.pid"
 LAUNCHER = Path(__file__).resolve().parent / "claude.py"
-# claude.py records per-project metadata here as <project>.json, keyed by the
-# container mount basename. Currently just the host checkout dir (host_dir) so the
-# drain tab can cd into the right repo -- no ~/repos assumption. Room for more
-# per-project state later. See _project_host_dir and claude.py.
+# All per-project state lives under projects/<name>/: the pending-writes /
+# pending-reads / pending-monitoring queues plus a host-only meta.json (host_dir,
+# so the drain tab can cd into the right repo -- no ~/repos assumption). claude.py
+# mounts projects/<name>/ AS the container's ~/.config/claude-toolkit, so container
+# paths stay fixed. Room for more per-project state later. See _project_host_dir.
 PROJECTS_DIR = APP_DIR / "projects"
-# Where the queue folder appears inside the container (~ resolves to the container
-# home, so no host path is hardcoded).
+# Where the queue folder appears inside the container (project-scoped mount, so no
+# per-project subfolder; ~ resolves to the container home).
 CONTAINER_QUEUE = "~/.config/claude-toolkit/pending-writes"
 POLL = 2               # seconds between polls
 MINT_MAX_AGE = 3000    # re-mint the token when older than this (50 min)
@@ -102,8 +100,8 @@ def _osaquote(s: str) -> str:
 
 def _build_prompt(project: str) -> str:
     """Assemble the exact queued tasks for `project` into one drain prompt."""
-    host_folder = QUEUE_DIR / project
-    container_folder = f"{CONTAINER_QUEUE}/{project}"
+    host_folder = PROJECTS_DIR / project / "pending-writes"
+    container_folder = CONTAINER_QUEUE
     files = sorted(p for p in host_folder.iterdir() if p.is_file() and p.name != "README.md")
     mds = [p for p in files if p.suffix == ".md"]
     others = [p.name for p in files if p.suffix != ".md"]
@@ -144,7 +142,7 @@ def _project_host_dir(project: str) -> Path:
     record is missing or stale so the tab still opens visibly rather than failing.
     """
     try:
-        data = json.loads((PROJECTS_DIR / f"{project}.json").read_text())
+        data = json.loads((PROJECTS_DIR / project / "meta.json").read_text())
         host_dir = Path(data["host_dir"])
         if host_dir.is_dir():
             return host_dir
@@ -162,7 +160,7 @@ def _open_terminal_tab(project: str) -> None:
     goes through AppleScript `write text` (which would submit it line by line).
     """
     cwd = _project_host_dir(project)
-    prompt_file = APP_DIR / f"drain-prompt-{project}.md"
+    prompt_file = PROJECTS_DIR / project / "drain-prompt.md"
     prompt_file.write_text(_build_prompt(project))
     launch = (
         f"cd {_shquote(str(cwd))} && "
@@ -293,7 +291,7 @@ def _ci_status_text(req: dict, result: dict) -> str:
 
 def _finish_watch(watches: dict, key: str, w: dict, text: str) -> None:
     """Write the result into pending-reads/, delete the request, drop the watch."""
-    dest = READS_DIR / w["project"]
+    dest = PROJECTS_DIR / w["project"] / "pending-reads"
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / f"ci-status-{w['slug']}.md"
     n = 2
@@ -314,11 +312,12 @@ def _service_monitoring(watches: dict) -> None:
     removal. On a monitor restart `watches` is empty and this re-scans the dir to
     resume (run resolution from the sha is stateless).
     """
-    MONITORING_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     now = time.time()
 
-    # Claim any new request files into memory.
-    for path in sorted(MONITORING_DIR.glob("*/*.json")):
+    # Claim any new request files into memory. Requests live at
+    # projects/<project>/pending-monitoring/<slug>.json.
+    for path in sorted(PROJECTS_DIR.glob("*/pending-monitoring/*.json")):
         key = str(path)
         if key in watches:
             continue
@@ -328,7 +327,7 @@ def _service_monitoring(watches: dict) -> None:
         except (json.JSONDecodeError, OSError):
             continue
         watches[key] = {
-            "req": req, "project": path.parent.name, "slug": path.stem,
+            "req": req, "project": path.parent.parent.name, "slug": path.stem,
             "first_seen": first_seen, "last_poll": 0.0,
         }
 
@@ -390,9 +389,10 @@ def main() -> int:
             # covers the case where our in-memory `launched` set was lost to a monitor
             # restart; `launched` covers the gap before the container shows up in
             # `docker ps` and stops us reopening while a drain still has work queued.
-            QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+            PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
             projects = {
-                f.name for f in QUEUE_DIR.iterdir() if f.is_dir() and _has_tasks(f)
+                p.name for p in PROJECTS_DIR.iterdir()
+                if (p / "pending-writes").is_dir() and _has_tasks(p / "pending-writes")
             }
             # A project no longer in `projects` has drained; forget it so a later
             # batch of pending writes reopens a tab for it.

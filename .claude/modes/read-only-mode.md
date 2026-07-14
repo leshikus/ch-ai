@@ -6,7 +6,7 @@ The session-start hook (`session_start.py`) drives on-start orientation: when th
 
 You **do** make local git commits yourself — committing writes only to the local repository, never to a remote, so it is safe here. Do the code change and `git commit` it in this session. What you must **not** do is anything that writes to a remote or to GitHub: do not `git push`, create PRs, edit PR titles/bodies, or post comments/reviews/review-comment replies. Delegate only those: after committing locally, queue the **push** (and any GitHub API write) as a pending write for the write-capable agent.
 
-For each delegated write, create one atomic file per operation in a per-project subfolder `~/.config/claude-toolkit/pending-writes/<project>/` (named `<short-slug>.md`), where `<project>` is the basename of the working directory the operation relates to — e.g. `createrelease` — following the queue format below. The subfolder groups a session's writes so the write-capable agent drains one project per tab. Each file has the exact command(s) to run and any payload text (PR body, comment/reply text) the command consumes. A separate write-capable agent (see `write-mode.md`) reads each pending file, executes its commands, and deletes it on success.
+For each delegated write, create one atomic file per operation in `~/.config/claude-toolkit/pending-writes/` (named `<short-slug>.md`), following the queue format below. That directory is this project's own queue (the container mounts only this project there), so the write-capable agent drains it as one project per tab. Each file has the exact command(s) to run and any payload text (PR body, comment/reply text) the command consumes. A separate write-capable agent (see `write-mode.md`) reads each pending file, executes its commands, and deletes it on success.
 
 Create new files only — never edit an existing file. You may delete a queued file, but only once the operation it represents is verified complete or definitively obsolete: e.g. its intended remote state already exists (a push whose commit is already the remote tip), or a later authoritative file supersedes it. Never delete a file to "unblock" yourself before its work is done, and never delete a file belonging to another task whose completion you have not verified.
 
@@ -28,7 +28,7 @@ Feed it the diff (`git show <sha>` / `git diff`) and the problem statement. Surf
 
 The `~/.config/claude-toolkit/pending-writes/` directory is a hand-off queue between a **read-only agent** (which commits locally but cannot push or write to GitHub) and a **write-capable agent** (which executes the remote/GitHub writes — see `write-mode.md`). Each pending write is **one atomic file**. Because the read-only agent has already committed, a code-change hand-off is typically just a `git push` of the branch — not a `git add`/`git commit`/`git push` sequence.
 
-Create one file per operation at `<project>/<short-slug>.md`, where `<project>` is the basename of the current working directory (e.g. `createrelease`). Do not use a date/time stamp — pick a distinct `<short-slug>` per operation so files never collide:
+Create one file per operation at `<short-slug>.md` directly in `pending-writes/`. Do not use a date/time stamp — pick a distinct `<short-slug>` per operation so files never collide:
 
     ### <project> — <short title>
     Context: <why this is needed; link to PR/issue/review comment if any>
@@ -87,8 +87,8 @@ A `pending-reads/` file is a verdict or result, not a write to run — never exe
 
 CI monitoring is automatic and offloaded to the host monitor — do **not** drive it with `/loop` yourself.
 
-- **Arming (automatic).** When a queued push is drained and lands, the `arm_monitor` PostToolUse hook (in the write container) drops a `ci` request into `~/.config/claude-toolkit/pending-monitoring/<project>/`. The host monitor claims it, polls the run with the host's own gh credentials, and on a terminal state writes a `ci-status-*` file into `pending-reads/` for you to react to (above).
-- **Arming your own.** You may also request monitoring directly — e.g. to follow a PR's CI you are not pushing to — by writing `pending-monitoring/<project>/<slug>.json`:
+- **Arming (automatic).** When a queued push is drained and lands, the `arm_monitor` PostToolUse hook (in the write container) drops a `ci` request into `~/.config/claude-toolkit/pending-monitoring/`. The host monitor claims it, polls the run with the host's own gh credentials, and on a terminal state writes a `ci-status-*` file into `pending-reads/` for you to react to (above).
+- **Arming your own.** You may also request monitoring directly — e.g. to follow a PR's CI you are not pushing to — by writing `pending-monitoring/<slug>.json`:
 
       {"kind": "ci", "repo": "owner/name", "sha": "<head-sha>", "branch": "<branch>", "pr": <number-or-null>, "pr_url": "<url-or-null>"}
 
@@ -135,7 +135,7 @@ Read the full modified files where the design intent isn't clear from the hunk, 
 
 When the user issues the **restart** command, exit Claude (end the current session), but first preserve the working context so the next session can resume where this one left off:
 
-1. Write the current context to `~/.config/claude-toolkit/pending-reads/<project>/on_restart.md`, where `<project>` is the basename of the working directory the session relates to (e.g. `createrelease`). Capture what you are in the middle of: the task, what has been done, what remains, any writes queued in `pending-writes/`, and any decisions still open. (This is resume context for the next session, not a change request — the next read-only session reads it to pick up where this one left off, then deletes it.)
+1. Write the current context to `~/.config/claude-toolkit/pending-reads/on_restart.md`. Capture what you are in the middle of: the task, what has been done, what remains, any writes queued in `pending-writes/`, and any decisions still open. (This is resume context for the next session, not a change request — the next read-only session reads it to pick up where this one left off, then deletes it.)
 2. As a fallback — in case the file cannot be written or is missed — also print the same context to the screen before exiting.
 
 Then exit.
