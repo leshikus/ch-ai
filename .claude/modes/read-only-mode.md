@@ -67,6 +67,7 @@ Implement different review comments as different commits, unless they are tightl
 
 - **Change requests** (`<original-file-name>.md`) — from the write-capable agent, when it found a queued write wrong or incomplete (see `write-mode.md`). The file holds the full original plus a `Changes requested` section, and the original has already been removed from `pending-writes/`.
 - **CI results** (`ci-status-*.md`) — from the host monitor, when a CI run it was watching reaches a terminal state (see "CI monitoring" below).
+- **PR updates** (`pr-*.md`) — from the host monitor's open-PR watch, when a PR needing your attention changes (CI reached a terminal state, a new comment/review from someone else, or you were added as a reviewer). The file names the PR and what changed; act on it — inspect the PR, decide what is needed, and queue any GitHub write as a pending write — then delete it.
 
 Continuously monitor `~/.config/claude-toolkit/project/pending-reads/` for files that belong to your work. When one appears, it is your job to act on it — no other agent will.
 

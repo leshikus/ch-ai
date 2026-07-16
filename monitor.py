@@ -3,7 +3,7 @@
 
 A std-lib `sched.scheduler` drives a time-ordered queue of `Event` objects. Each
 event's `fire` does its work and re-arms itself (or schedules other events) on the
-scheduler, so the queue never empties and the loop runs forever. Three recurring
+scheduler, so the queue never empties and the loop runs forever. Four recurring
 events cover the jobs below; the monitoring event schedules a fresh CiWatchEvent
 per request it discovers -- events adding events at runtime:
   1. Keep the read-only GitHub token fresh -- re-mint when the token file is older
@@ -24,6 +24,18 @@ per request it discovers -- events adding events at runtime:
      so a restart re-scans it and resumes. GitHub is polled with the host's own gh
      credentials (not the container's read-only token), so Actions/checks are
      readable.
+  4. Watch every open pull request (authored by you + review-requested) for a
+     change that needs your attention -- CI reaching a terminal state, a new
+     comment/review from someone else, or a fresh review request. Each change fires
+     a macOS notification and is handed to a read-only agent: if a project already
+     tracks the PR (its dir exists under projects/, or its meta.json claims it) the
+     change lands in that project's pending-reads/; otherwise a per-PR iTerm console
+     is opened that clones the PR into projects/pr<N>/repo and starts a read-only
+     session on it. A periodic digest summarizes the open set. The monitor only ever
+     touches projects/ -- it never learns a repo's local layout, and per-PR checkouts
+     live inside projects/. Per-PR state persists to pr-state.json, so the frequent
+     self-supersede restarts do not re-notify; a PR seen for the first time is
+     baselined silently.
 
 One instance runs at a time: on startup a new monitor supersedes any running
 one (SIGTERMs the incumbent via the PID file, then claims it), so a relaunch
@@ -36,6 +48,7 @@ Host-only (mints tokens, opens GUI terminal tabs); never runs inside a container
 
 import json
 import os
+import re
 import sched
 import signal
 import subprocess
@@ -62,6 +75,9 @@ POLL = 2               # seconds between polls
 MINT_MAX_AGE = 3000    # re-mint the token when older than this (50 min)
 CI_POLL_INTERVAL = 150     # seconds between polls of a single monitoring request
 WATCH_EXPIRY = 6 * 3600    # give up on a watch with no terminal result after this
+PR_SCAN_INTERVAL = 300     # seconds between full open-PR scans
+PR_DIGEST_INTERVAL = 3600  # seconds between summary ("regular") notifications
+PR_STATE_FILE = APP_DIR / "pr-state.json"  # per-PR state, so restarts don't re-notify
 
 
 def _supersede_incumbent() -> None:
@@ -190,21 +206,30 @@ def _open_terminal_tab(project: str) -> None:
         f"cd {_shquote(str(cwd))} && "
         f'python3 {_shquote(str(LAUNCHER))} --write "$(cat {_shquote(str(prompt_file))})"'
     )
-    title = _osaquote(project)
+    _open_iterm_tab(project, launch)
+
+
+def _open_iterm_tab(title: str, launch: str) -> None:
+    """Open an iTerm2 tab titled `title` whose shell runs `launch`.
+
+    Reuses the current window (new tab) or creates one if none is open. The command
+    is passed via AppleScript `write text`, so it must be a single shell line.
+    """
+    t = _osaquote(title)
     cmd = _osaquote(launch)
     script = (
         'tell application "iTerm2"\n'
         "  if (count of windows) = 0 then\n"
         "    create window with default profile\n"
         "    tell current session of current window\n"
-        f"      set name to {title}\n"
+        f"      set name to {t}\n"
         f"      write text {cmd}\n"
         "    end tell\n"
         "  else\n"
         "    tell current window\n"
         "      create tab with default profile\n"
         "      tell current session of current tab\n"
-        f"        set name to {title}\n"
+        f"        set name to {t}\n"
         f"        write text {cmd}\n"
         "      end tell\n"
         "    end tell\n"
@@ -490,6 +515,282 @@ class CiWatchEvent(Event):
             self.arm(CI_POLL_INTERVAL)
 
 
+# ---- Job 4: watching every open PR for changes that need attention ----------
+
+
+def _notify(title: str, message: str) -> None:
+    """Post a macOS notification (best-effort; never raises)."""
+    script = (
+        f"display notification {_osaquote(message)} "
+        f'with title {_osaquote(title)} sound name "Glass"'
+    )
+    subprocess.run(["osascript", "-e", script], check=False)
+
+
+def _load_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _save_json(path: Path, data) -> None:
+    """Write `data` as JSON atomically (tmp file + rename)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def _current_login() -> str:
+    """The gh account login this monitor runs as (empty string if unavailable)."""
+    r = subprocess.run(["gh", "api", "user", "-q", ".login"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _pr_key(pr: dict) -> str:
+    """Stable identity for a PR across scans: ``owner/name#number``."""
+    return f"{pr['repository']['nameWithOwner']}#{pr['number']}"
+
+
+def _search_prs(filters: list) -> list:
+    """Open PRs matching `filters`, via `gh search prs` (host credentials)."""
+    data = _gh_json([
+        "search", "prs", "--state", "open", "--limit", "100",
+        "--json", "number,repository,title,url", *filters,
+    ])
+    return data or []
+
+
+def _ci_bucket(checks) -> str:
+    """Collapse a check list to one of none/pending/failure/success."""
+    if not checks:
+        return "none"
+    verdicts = [_check_verdict(c) for c in checks]
+    if any(v in _PENDING_VERDICTS for v in verdicts):
+        return "pending"
+    if any(v in _FAILED_VERDICTS for v in verdicts):
+        return "failure"
+    return "success"
+
+
+def _latest_foreign_activity(detail: dict, login: str) -> str:
+    """Newest ISO timestamp of a comment/review authored by someone other than `login`.
+
+    ISO-8601 UTC strings sort lexicographically, so ``max`` gives the latest. Empty
+    string when there is none (compares less than any real timestamp).
+    """
+    stamps = []
+    for c in detail.get("comments") or []:
+        if (c.get("author") or {}).get("login") != login and c.get("createdAt"):
+            stamps.append(c["createdAt"])
+    for rv in detail.get("reviews") or []:
+        if (rv.get("author") or {}).get("login") != login and rv.get("submittedAt"):
+            stamps.append(rv["submittedAt"])
+    return max(stamps) if stamps else ""
+
+
+def _pr_project(pr: dict) -> str:
+    """Project name for a PR: ``pr<number>``, disambiguated on a cross-repo clash.
+
+    Per-PR state and its checkout live under projects/<name>/. Two different repos
+    can share a PR number, so if projects/pr<n>/ already claims a *different* PR we
+    fall back to ``pr<n>-<repo>``.
+    """
+    base = f"pr{pr['number']}"
+    claimed = (_load_json(PROJECTS_DIR / base / "meta.json", {}).get("pr") or {}).get("key")
+    if claimed and claimed != _pr_key(pr):
+        return re.sub(r"[^a-zA-Z0-9_.-]", "-", f"{base}-{pr['repository']['name']}")
+    return base
+
+
+def _meta_pr_claims() -> dict:
+    """Map pr_key -> project for every project whose meta.json claims a PR.
+
+    Lets a manually-opened session (session_start records its branch's PR into
+    meta.json) claim a PR, so a change routes to that existing agent instead of
+    opening a duplicate console.
+    """
+    claims = {}
+    if not PROJECTS_DIR.is_dir():
+        return claims
+    for meta in PROJECTS_DIR.glob("*/meta.json"):
+        pr = (_load_json(meta, {}) or {}).get("pr")
+        if isinstance(pr, dict) and pr.get("key"):
+            claims[pr["key"]] = meta.parent.name
+    return claims
+
+
+def _pr_change_text(pr: dict, notes: list) -> str:
+    """Render a PR change as a pending-reads item for a read-only agent to act on."""
+    return (
+        f"### PR update — {_pr_key(pr)}\n"
+        f"{pr.get('title') or ''}\n"
+        f"URL: {pr.get('url')}\n\n"
+        f"What changed: {'; '.join(notes)}.\n\n"
+        "Act on this PR: inspect it (`gh pr view` / `gh pr diff` and its review "
+        "threads), decide what is needed (reply to a reviewer, root-cause and fix "
+        "failing CI, take up a review request), and queue any GitHub writes as "
+        "pending writes. This is a result to act on, not a command to run.\n"
+    )
+
+
+def _deliver_pr_read(project: str, number: int, text: str) -> None:
+    """Drop a PR-update item into a project's pending-reads inbox."""
+    dest = PROJECTS_DIR / project / "pending-reads"
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / f"pr-{number}.md"
+    n = 2
+    while out.exists():
+        out = dest / f"pr-{number}-{n}.md"
+        n += 1
+    out.write_text(text)
+
+
+def _write_pr_meta(project: str, pr: dict) -> None:
+    """Record the PR claim + checkout dir in the project's meta.json (merging)."""
+    d = PROJECTS_DIR / project
+    d.mkdir(parents=True, exist_ok=True)
+    meta = _load_json(d / "meta.json", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["host_dir"] = str(d / "repo")
+    meta["pr"] = {
+        "key": _pr_key(pr),
+        "repo": pr["repository"]["nameWithOwner"],
+        "number": pr["number"],
+        "url": pr.get("url"),
+    }
+    _save_json(d / "meta.json", meta)
+
+
+def _open_pr_console(pr: dict, project: str) -> None:
+    """Open an iTerm tab that clones the PR into projects/<project>/repo and starts
+    a read-only session on it. The checkout stays inside the monitor's own projects/
+    subtree; the repo is fetched by its GitHub coordinate, so no local repo-layout
+    knowledge is needed."""
+    repo = pr["repository"]["nameWithOwner"]
+    checkout = PROJECTS_DIR / project / "repo"
+    q = lambda s: _shquote(str(s))
+    prep = (
+        f"mkdir -p {q(checkout)} && cd {q(checkout)} && "
+        f"{{ [ -e .git ] || gh repo clone {q(repo)} . ; }} && "
+        f"gh pr checkout {pr['number']}"
+    )
+    launch = f"{prep} && python3 {q(LAUNCHER)}"
+    _open_iterm_tab(f"PR #{pr['number']}", launch)
+
+
+class PullRequestsEvent(Event):
+    """Watch every open PR for a change that needs the user's attention.
+
+    Sources: `gh search prs --author @me` and `--review-requested @me`. For each PR
+    it compares CI state, latest foreign comment/review timestamp, and the review-
+    requested flag against `self.state` (persisted to PR_STATE_FILE, so the monitor's
+    frequent self-supersede restarts do not re-notify). A PR seen for the first time
+    is baselined silently. On a transition it notifies (macOS) and routes the change
+    to a read-only agent -- an existing project's pending-reads, or a fresh per-PR
+    console. A periodic digest summarizes the open set. Re-arms every PR_SCAN_INTERVAL.
+    """
+
+    priority = 4
+
+    def __init__(self, scheduler: sched.scheduler) -> None:
+        super().__init__(scheduler)
+        self.state = _load_json(PR_STATE_FILE, {})
+        if not isinstance(self.state, dict):
+            self.state = {}
+        self.login = _current_login()
+        self.launched: set[str] = set()  # PRs we opened a console for this run
+        self.last_digest = 0.0
+
+    def fire(self) -> None:
+        try:
+            self._scan()
+        except Exception as exc:  # keep the loop alive across transient failures
+            print(f"monitor: PR scan failed: {exc}", file=sys.stderr)
+        self.arm(PR_SCAN_INTERVAL)
+
+    def _scan(self) -> None:
+        review_prs = _search_prs(["--review-requested", "@me"])
+        review_keys = {_pr_key(p) for p in review_prs}
+        prs = {_pr_key(p): p for p in _search_prs(["--author", "@me"]) + review_prs}
+
+        claims = _meta_pr_claims()
+        need_action = 0
+        for key, pr in prs.items():
+            notes = self._evaluate(key, pr, key in review_keys)
+            if notes:
+                need_action += 1
+                self._dispatch(key, pr, notes, claims)
+
+        # Forget PRs that merged/closed so their state and launch guard don't linger.
+        self.state = {k: v for k, v in self.state.items() if k in prs}
+        self.launched &= set(prs)
+        _save_json(PR_STATE_FILE, self.state)
+
+        now = time.time()
+        if now - self.last_digest >= PR_DIGEST_INTERVAL:
+            self.last_digest = now
+            _notify("Open pull requests", f"{len(prs)} open, {need_action} need action")
+
+    def _evaluate(self, key: str, pr: dict, is_review_req: bool) -> list:
+        """Update stored state for a PR; return the human-readable changes, if any.
+
+        First sight baselines silently (returns []), so pre-existing comments/CI on
+        a PR the monitor has never seen do not fire a notification.
+        """
+        repo = pr["repository"]["nameWithOwner"]
+        detail = _gh_json([
+            "pr", "view", str(pr["number"]), "--repo", repo,
+            "--json", "statusCheckRollup,comments,reviews",
+        ]) or {}
+        cur = {
+            "ci": _ci_bucket(detail.get("statusCheckRollup")),
+            "activity": _latest_foreign_activity(detail, self.login),
+            "review_requested": is_review_req,
+        }
+        prev = self.state.get(key)
+        self.state[key] = cur
+        if prev is None:
+            return []
+        notes = []
+        if prev.get("ci") == "pending" and cur["ci"] in ("success", "failure"):
+            notes.append(f"CI {cur['ci']}")
+        if cur["activity"] and cur["activity"] > (prev.get("activity") or ""):
+            notes.append("new comment/review")
+        if is_review_req and not prev.get("review_requested"):
+            notes.append("added as reviewer")
+        return notes
+
+    def _dispatch(self, key: str, pr: dict, notes: list, claims: dict) -> None:
+        """Notify, and hand the change to a read-only agent (existing or fresh)."""
+        title = (pr.get("title") or "")[:50]
+        _notify(f"PR #{pr['number']}: {title}", "; ".join(notes))
+        text = _pr_change_text(pr, notes)
+
+        # An agent already tracks this PR -> its pending-reads inbox. Match either an
+        # explicit meta.json claim (a manual session) or the deterministic project dir
+        # a prior console created.
+        project = claims.get(key)
+        if project is None:
+            deterministic = _pr_project(pr)
+            if (PROJECTS_DIR / deterministic).is_dir():
+                project = deterministic
+        if project is not None:
+            _deliver_pr_read(project, pr["number"], text)
+            return
+
+        # No agent yet: open a per-PR console (once per run; the project dir it leaves
+        # behind routes later changes to pending-reads even after a monitor restart).
+        if key in self.launched:
+            return
+        self.launched.add(key)
+        project = _pr_project(pr)
+        _deliver_pr_read(project, pr["number"], text)  # pre-seed the new inbox
+        _write_pr_meta(project, pr)
+        _open_pr_console(pr, project)
+
+
 def main() -> int:
     _supersede_incumbent()
     PIDFILE.write_text(str(os.getpid()))
@@ -498,6 +799,7 @@ def main() -> int:
         MintTokenEvent(scheduler).arm(0)       # keep the read-only token fresh
         DrainQueueEvent(scheduler).arm(0)      # drain pending-writes -> --write tabs
         ScanMonitoringEvent(scheduler).arm(0)  # pending-monitoring -> pending-reads
+        PullRequestsEvent(scheduler).arm(0)    # open PRs -> notify + per-PR console
         # Recurring events re-arm themselves, so the queue never empties and run()
         # blocks forever -- until the process is killed.
         scheduler.run()

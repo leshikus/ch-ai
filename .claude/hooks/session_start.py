@@ -128,6 +128,35 @@ def pr_view(branch):
     )
 
 
+def record_pr_meta(pr):
+    """Record this branch's PR into the project's meta.json (merging).
+
+    The host monitor reads these claims (``pr.key`` = ``owner/name#number``) to route
+    a PR change to the project already working on it -- instead of opening a duplicate
+    per-PR console. META_FILE is mounted rw, so the write persists to the host.
+    """
+    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr.get("url") or "")
+    if not m:
+        return
+    owner, name, number = m.group(1), m.group(2), m.group(3)
+    try:
+        data = json.loads(META_FILE.read_text())
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data["pr"] = {
+        "key": f"{owner}/{name}#{number}",
+        "repo": f"{owner}/{name}",
+        "number": int(number),
+        "url": pr.get("url"),
+    }
+    try:
+        META_FILE.write_text(json.dumps(data) + "\n")
+    except OSError as exc:
+        print(f"(could not record PR in {META_FILE}: {exc})", file=sys.stderr)
+
+
 def report_pr(pr, lines):
     """Summarize the PR's progress into ``lines``."""
     draft = " (draft)" if pr.get("isDraft") else ""
@@ -267,6 +296,7 @@ def main():
         lines.append("PR: none for this branch")
         return finish(lines)
 
+    record_pr_meta(pr)
     report_pr(pr, lines)
     report_review_threads(pr, lines)
     lines.append(
