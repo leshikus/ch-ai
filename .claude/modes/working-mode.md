@@ -15,10 +15,23 @@ Never amend or force-push a commit that has already been pushed. Get each commit
 right *before* you push it — a broken change that reaches the PR turns into a long
 back-and-forth with a reviewer bot, which is exactly what we are avoiding.
 
-> A pre-push review gate (a separate reviewer agent that inspects your commits
-> before a push completes) is being added in the next step. Until it lands, review
-> your own diff carefully before pushing; once it lands, this section will describe
-> how the gate hands findings back to you.
+## The pre-push review gate
+
+Before a `git push` completes, a `PreToolUse` hook runs a **separate reviewer agent
+(a different model)** over the exact commits you are about to push. It looks only
+for concrete defects — bugs, regressions, or a change that does not do what its
+commit message claims — not style or missing tests.
+
+- **Clean commits** pass straight through and the push proceeds; CI starts
+  immediately.
+- **A concrete defect** blocks the push. The reviewer's findings come back to you
+  as the denial reason. Fix them in a **NEW** commit (never amend an already-pushed
+  commit), then push again. If you believe a finding is wrong, resolve it with the
+  user before retrying — do not try to route around the gate.
+
+The gate fails open (a reviewer error/timeout allows the push), so it never wedges
+you; but treat a real BLOCK as a stop. Do not disable or bypass it — it exists to
+keep broken changes out of the PR.
 
 ## Writes are captured for later review
 

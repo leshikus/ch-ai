@@ -15,10 +15,13 @@ the container. The host's own ~/.claude is mounted as-is, so the session runs in
 the user's real Claude environment (their CLAUDE.md, skills, plugins, history);
 our behavior is layered on via --settings (hooks) and --append-system-prompt.
 
-Two hooks observe the session (they never gate it): capture_writes logs every
-remote write to the global writes log (~/.config/claude-toolkit/writes-log/) for a
-separate --review session to analyze after the fact, and arm_monitor arms the host
-monitor's CI watch after a successful push. The host monitor also watches open PRs.
+Hooks layer our behavior on: pre_push_review (PreToolUse) gates a `git push` on a
+separate reviewer agent (a different model) that inspects the commits about to be
+pushed and blocks concrete defects before they reach the PR; capture_writes
+(PostToolUse) logs every remote write to the global writes log
+(~/.config/claude-toolkit/writes-log/) for a separate --review session to analyze
+after the fact; and arm_monitor (PostToolUse) arms the host monitor's CI watch
+after a successful push. The host monitor also watches open PRs.
 """
 
 import json
@@ -226,6 +229,7 @@ def main() -> None:
     # under ~/.config/claude-toolkit/ below -- NOT into ~/.claude, so we no longer
     # overwrite the user's ~/.claude dir. Fixed paths, independent of where the
     # checkout lives.
+    pre_push_script = "/home/ubuntu/.config/claude-toolkit/hooks/pre_push_review.py"
     capture_script = "/home/ubuntu/.config/claude-toolkit/hooks/capture_writes.py"
     session_start_script = "/home/ubuntu/.config/claude-toolkit/hooks/session_start.py"
     arm_monitor_script = "/home/ubuntu/.config/claude-toolkit/hooks/arm_monitor.py"
@@ -259,6 +263,16 @@ def main() -> None:
             "SessionStart": [
                 {
                     "hooks": [{"type": "command", "command": f"python3 {session_start_script}"}],
+                }
+            ],
+            # Before a Bash command runs: pre_push_review gates a `git push` on a
+            # separate reviewer agent (a different model). It denies the push only on
+            # a concrete defect and fails open otherwise, so it never wedges the
+            # session; non-push commands pass straight through.
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": f"python3 {pre_push_script}"}],
                 }
             ],
             # After a Bash command runs: capture_writes logs any remote write to the
