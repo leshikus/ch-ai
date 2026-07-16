@@ -3,37 +3,27 @@
 
 A std-lib `sched.scheduler` drives a time-ordered queue of `Event` objects. Each
 event's `fire` does its work and re-arms itself (or schedules other events) on the
-scheduler, so the queue never empties and the loop runs forever. Four recurring
+scheduler, so the queue never empties and the loop runs forever. Two recurring
 events cover the jobs below; the monitoring event schedules a fresh CiWatchEvent
 per request it discovers -- events adding events at runtime:
-  1. Keep the read-only GitHub token fresh -- re-mint when the token file is older
-     than ~50 min (installation tokens live ~60 min).
-  2. Drain the pending-writes queue -- for each project that has pending writes and
-     no drain already running, open a terminal tab (interactive `claude.py --write`,
-     titled by project) to process it. One tab PER PROJECT, run concurrently, so
-     several projects drain in parallel instead of waiting in a single line. Each
-     project's drain is guarded by `docker ps` on its own
-     `claude-toolkit-drain-<project>` container, so a restart cannot spawn a
-     duplicate for a project already draining.
-  3. Service the pending-monitoring queue -- each request (dispatched by `kind`;
+  1. Service the pending-monitoring queue -- each request (dispatched by `kind`;
      `ci` today) is a job to watch, e.g. a CI run armed by the arm_monitor push
      hook. Poll it to a terminal state, then hand the result back as a
-     `ci-status-*` file in pending-reads for the read-only agent to react to.
+     `ci-status-*` file in pending-reads for the working agent to react to.
      Requests are claimed into memory on first sight, so deleting the request file
      mid-watch cannot abort it; pending-monitoring also doubles as durable state,
      so a restart re-scans it and resumes. GitHub is polled with the host's own gh
-     credentials (not the container's read-only token), so Actions/checks are
-     readable.
-  4. Watch every open pull request (authored by you + review-requested) for a
+     credentials, independent of the container, so Actions/checks are readable.
+  2. Watch every open pull request (authored by you + review-requested) for a
      change that needs your attention -- CI reaching a terminal state, a new
      comment/review from someone else, or a fresh review request. Each change fires
-     a macOS notification and is handed to a read-only agent: if a project already
-     tracks the PR (its dir exists under projects/, or its meta.json claims it) the
-     change lands in that project's pending-reads/; otherwise a per-PR iTerm console
-     is opened that clones the PR into projects/pr<N>/repo and starts a read-only
-     session on it. A periodic digest summarizes the open set. The monitor only ever
-     touches projects/ -- it never learns a repo's local layout, and per-PR checkouts
-     live inside projects/. Per-PR state persists to pr-state.json, so the frequent
+     a macOS notification and is handed to an agent: if a project already tracks the
+     PR (its dir exists under projects/, or its meta.json claims it) the change
+     lands in that project's pending-reads/; otherwise a per-PR iTerm console is
+     opened that clones the PR into projects/pr<N>/repo and starts a session on it.
+     A periodic digest summarizes the open set. The monitor only ever touches
+     projects/ -- it never learns a repo's local layout, and per-PR checkouts live
+     inside projects/. Per-PR state persists to pr-state.json, so the frequent
      self-supersede restarts do not re-notify; a PR seen for the first time is
      baselined silently.
 
@@ -43,7 +33,8 @@ always picks up the newest code. Started detached by claude.py; runs until
 killed:
     kill "$(cat ~/.config/claude-toolkit/monitor.pid)"
 
-Host-only (mints tokens, opens GUI terminal tabs); never runs inside a container.
+Host-only (opens GUI terminal tabs, polls GitHub with the host's own gh
+credentials); never runs inside a container.
 """
 
 import json
@@ -56,23 +47,15 @@ import sys
 import time
 from pathlib import Path
 
-import mint_gh_token
-from claude import container_name
-
 APP_DIR = Path(os.path.expanduser("~/.config/claude-toolkit"))
 PIDFILE = APP_DIR / "monitor.pid"
 LAUNCHER = Path(__file__).resolve().parent / "claude.py"
-# All per-project state lives under projects/<name>/: the pending-writes /
-# pending-reads / pending-monitoring queues plus meta.json (host_dir, so the drain
-# tab can cd into the right repo -- no ~/repos assumption). claude.py mounts
-# projects/<name>/ at the container's ~/.config/claude-toolkit/project, so the
-# container queue paths are project-scoped. See _project_host_dir.
+# All per-project state lives under projects/<name>/: the pending-reads /
+# pending-monitoring queues plus meta.json (host_dir + any PR claim). claude.py
+# mounts projects/<name>/ at the container's ~/.config/claude-toolkit/project, so the
+# container queue paths are project-scoped.
 PROJECTS_DIR = APP_DIR / "projects"
-# Where the queue folder appears inside the container (project-scoped mount, so no
-# per-project subfolder; ~ resolves to the container home).
-CONTAINER_QUEUE = "~/.config/claude-toolkit/project/pending-writes"
 POLL = 2               # seconds between polls
-MINT_MAX_AGE = 3000    # re-mint the token when older than this (50 min)
 CI_POLL_INTERVAL = 150     # seconds between polls of a single monitoring request
 WATCH_EXPIRY = 6 * 3600    # give up on a watch with no terminal result after this
 PR_SCAN_INTERVAL = 300     # seconds between full open-PR scans
@@ -109,104 +92,12 @@ def _supersede_incumbent() -> None:
         time.sleep(0.1)
 
 
-def _token_age() -> float:
-    """Seconds since the token was last minted (inf if it does not exist yet)."""
-    try:
-        return time.time() - mint_gh_token.HOSTS_YML.stat().st_mtime
-    except FileNotFoundError:
-        return float("inf")
-
-
-def _has_tasks(folder: Path) -> bool:
-    return any(p.is_file() and p.name != "README.md" for p in folder.iterdir())
-
-
-def _drain_running(project: str) -> bool:
-    """True if a --write drain container for `project` is currently running."""
-    r = subprocess.run(
-        ["docker", "ps", "--filter", f"name=^{container_name(project)}$", "-q"],
-        capture_output=True, text=True,
-    )
-    return bool(r.stdout.strip())
-
-
 def _shquote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
 def _osaquote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def _build_prompt(project: str) -> str:
-    """Assemble the exact queued tasks for `project` into one drain prompt."""
-    host_folder = PROJECTS_DIR / project / "pending-writes"
-    container_folder = CONTAINER_QUEUE
-    files = sorted(p for p in host_folder.iterdir() if p.is_file() and p.name != "README.md")
-    mds = [p for p in files if p.suffix == ".md"]
-    others = [p.name for p in files if p.suffix != ".md"]
-    parts = [
-        f"You are the write-capable agent draining the pending-writes queue for "
-        f"project '{project}'. The task files are in {container_folder}. Process each "
-        f"task in order: summarize it, honor its guards, run its commands (approving "
-        f"prompts as needed), and delete the file on error-less success.",
-        "Before executing any task, review the contents it will produce -- not just "
-        "that the command is well-formed. The read-only agent that queued it could "
-        "not run code, post to GitHub, or see CI, so verify the substance. For a "
-        "push, review ALL the code it introduces relative to the remote tip: read "
-        "the full diff of every new commit (not a --stat summary or file list), "
-        "confirm it does what the task's Context claims and introduces no bug, "
-        "regression, or unintended change; for a fix addressing a review comment, "
-        "confirm it actually resolves the reviewer's point. If the project provides "
-        "a review skill or command (e.g. ClickHouse's `/review` under "
-        "`.claude/skills/review`), run it on the pushed diff or PR and fold its "
-        "findings into your decision. Execute only once the review passes; if the "
-        "contents are wrong or incomplete, do not run it -- request changes instead "
-        "(see write-mode.md).",
-    ]
-    if others:
-        parts.append(
-            "Companion payload files in that folder, read as referenced: "
-            + ", ".join(others) + "."
-        )
-    parts.append("The exact queued tasks follow.")
-    parts += [f"===== {p.name} =====\n{p.read_text().rstrip()}" for p in mds]
-    return "\n\n".join(parts)
-
-
-def _project_host_dir(project: str) -> Path:
-    """Host checkout dir for a drained project, recorded by claude.py at launch.
-
-    claude.py writes projects/<project>.json = {"host_dir": ...} for each session; the
-    drain tab cd's there before launching claude.py --write. Falls back to $HOME if the
-    record is missing or stale so the tab still opens visibly rather than failing.
-    """
-    try:
-        data = json.loads((PROJECTS_DIR / project / "meta.json").read_text())
-        host_dir = Path(data["host_dir"])
-        if host_dir.is_dir():
-            return host_dir
-    except (OSError, ValueError, KeyError):
-        pass
-    return Path.home()
-
-
-def _open_terminal_tab(project: str) -> None:
-    """Open a terminal tab running an interactive --write drain for this project.
-
-    Defaults to iTerm2 (swap the AppleScript here for Terminal.app or another
-    emulator if needed). The exact queued task contents are handed to the session
-    via a prompt file the tab's shell reads with $(cat ...), so no multi-line text
-    goes through AppleScript `write text` (which would submit it line by line).
-    """
-    cwd = _project_host_dir(project)
-    prompt_file = PROJECTS_DIR / project / "drain-prompt.md"
-    prompt_file.write_text(_build_prompt(project))
-    launch = (
-        f"cd {_shquote(str(cwd))} && "
-        f'python3 {_shquote(str(LAUNCHER))} --write "$(cat {_shquote(str(prompt_file))})"'
-    )
-    _open_iterm_tab(project, launch)
 
 
 def _open_iterm_tab(title: str, launch: str) -> None:
@@ -363,69 +254,12 @@ class Event:
         raise NotImplementedError
 
 
-class MintTokenEvent(Event):
-    """Keep the read-only GitHub token fresh, then re-arm for when it next goes
-    stale (or sooner, to retry after a mint failure)."""
-
-    priority = 0
-
-    def fire(self) -> None:
-        age = _token_age()
-        if age > MINT_MAX_AGE:
-            try:
-                mint_gh_token.mint()
-                age = 0.0
-            except Exception as exc:  # keep the loop alive across transient failures
-                print(f"monitor: token mint failed, retrying soon: {exc}", file=sys.stderr)
-                self.arm(POLL)
-                return
-        self.arm(max(POLL, MINT_MAX_AGE - age))
-
-
-class DrainQueueEvent(Event):
-    """Open one interactive --write drain tab per project with pending writes.
-
-    `launched` remembers projects we have already opened a tab for in the current
-    batch; a project stays until its queue actually drains, so we open at most one
-    tab per project per batch (never more open tabs than projects with pending
-    writes, and no reopening when a drain leaves work behind, e.g. a `Status:
-    failed` file, and its container has exited). `_drain_running` covers a
-    `launched` set lost to a monitor restart; `launched` covers the gap before the
-    container shows up in `docker ps`. Re-arms every POLL.
-    """
-
-    priority = 1
-
-    def __init__(self, scheduler: sched.scheduler) -> None:
-        super().__init__(scheduler)
-        self.launched: set[str] = set()
-
-    def fire(self) -> None:
-        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        projects = {
-            p.name for p in PROJECTS_DIR.iterdir()
-            if (p / "pending-writes").is_dir() and _has_tasks(p / "pending-writes")
-        }
-        # A project no longer present has drained; forget it so a later batch of
-        # pending writes reopens a tab for it.
-        self.launched &= projects
-        for project in sorted(projects):
-            if project in self.launched:
-                continue
-            if _drain_running(project):
-                self.launched.add(project)
-                continue
-            _open_terminal_tab(project)
-            self.launched.add(project)
-        self.arm(POLL)
-
-
 class ScanMonitoringEvent(Event):
     """Discover new pending-monitoring requests and add a CiWatchEvent for each.
 
     A request (projects/<project>/pending-monitoring/<slug>.json) is claimed on
     first sight -- its path recorded in `active` and turned into a watch event --
-    so a later deletion of the request file (e.g. by an over-eager read-only
+    so a later deletion of the request file (e.g. by an over-eager
     agent) cannot abort or re-add a watch in flight. On a monitor restart `active`
     is empty and this re-scans the dir to resume: a terminal watch already deleted
     its file, so only unfinished requests reappear (run resolution from the sha is
@@ -621,7 +455,7 @@ def _meta_pr_claims() -> dict:
 
 
 def _pr_change_text(pr: dict, notes: list) -> str:
-    """Render a PR change as a pending-reads item for a read-only agent to act on."""
+    """Render a PR change as a pending-reads item for a agent to act on."""
     return (
         f"### PR update — {_pr_key(pr)}\n"
         f"{pr.get('title') or ''}\n"
@@ -665,7 +499,7 @@ def _write_pr_meta(project: str, pr: dict) -> None:
 
 def _open_pr_console(pr: dict, project: str) -> None:
     """Open an iTerm tab that clones the PR into projects/<project>/repo and starts
-    a read-only session on it. The checkout stays inside the monitor's own projects/
+    a session on it. The checkout stays inside the monitor's own projects/
     subtree; the repo is fetched by its GitHub coordinate, so no local repo-layout
     knowledge is needed."""
     repo = pr["repository"]["nameWithOwner"]
@@ -688,7 +522,7 @@ class PullRequestsEvent(Event):
     requested flag against `self.state` (persisted to PR_STATE_FILE, so the monitor's
     frequent self-supersede restarts do not re-notify). A PR seen for the first time
     is baselined silently. On a transition it notifies (macOS) and routes the change
-    to a read-only agent -- an existing project's pending-reads, or a fresh per-PR
+    to a agent -- an existing project's pending-reads, or a fresh per-PR
     console. A periodic digest summarizes the open set. Re-arms every PR_SCAN_INTERVAL.
     """
 
@@ -763,7 +597,7 @@ class PullRequestsEvent(Event):
         return notes
 
     def _dispatch(self, key: str, pr: dict, notes: list, claims: dict) -> None:
-        """Notify, and hand the change to a read-only agent (existing or fresh)."""
+        """Notify, and hand the change to a agent (existing or fresh)."""
         title = (pr.get("title") or "")[:50]
         _notify(f"PR #{pr['number']}: {title}", "; ".join(notes))
         text = _pr_change_text(pr, notes)
@@ -796,8 +630,6 @@ def main() -> int:
     PIDFILE.write_text(str(os.getpid()))
     try:
         scheduler = sched.scheduler(time.time, time.sleep)
-        MintTokenEvent(scheduler).arm(0)       # keep the read-only token fresh
-        DrainQueueEvent(scheduler).arm(0)      # drain pending-writes -> --write tabs
         ScanMonitoringEvent(scheduler).arm(0)  # pending-monitoring -> pending-reads
         PullRequestsEvent(scheduler).arm(0)    # open PRs -> notify + per-PR console
         # Recurring events re-arm themselves, so the queue never empties and run()

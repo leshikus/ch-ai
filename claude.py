@@ -31,7 +31,6 @@ after a successful push. The host monitor also watches open PRs.
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -43,17 +42,6 @@ HOME = Path.home()
 # All of our runtime state lives here (mounted into the container), kept out of
 # Claude Code's own ~/.claude.
 APP_DIR = HOME / ".config" / "claude-toolkit"
-
-
-def container_name(project: str) -> str:
-    """Docker container name for a project's --write drain.
-
-    Per-project so multiple drains run concurrently -- one tab (and one container)
-    each. Sanitized to Docker's allowed name charset [a-zA-Z0-9_.-]. monitor.py
-    imports this so the name it filters `docker ps` on matches the one claude.py sets.
-    """
-    safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", project)
-    return f"claude-toolkit-drain-{safe}"
 
 
 def real_gh_config() -> str:

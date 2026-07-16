@@ -4,11 +4,11 @@ follow the resulting CI run.
 
 It drops a `kind: ci` request into ~/.config/claude-toolkit/project/pending-monitoring/,
 which the host `monitor.py` consumes: it polls the run to conclusion and writes a
-`ci-status-*` result into pending-reads/ for the read-only agent to react to.
+`ci-status-*` result into pending-reads/ for the working agent to react to.
 
-Self-gating: in a read-only session the queue_writes PreToolUse hook DENIES a
-`git push`, so it never executes and PostToolUse never fires for it. This hook
-therefore only ever arms on a real push -- i.e. inside the write drain container.
+Fires on any real push in the working session (in auto mode writes execute
+directly). A push that fails to advance the remote-tracking ref is skipped below,
+so a rejected push does not arm a phantom watch.
 
 Success is judged offline: a successful `git push` advances the local
 remote-tracking ref, so HEAD == the push/upstream ref afterwards. A failed push
